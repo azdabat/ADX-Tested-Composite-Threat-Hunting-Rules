@@ -1,0 +1,36 @@
+// ============================================================================
+// WMI-A2_L2_Permanent_Subscription_Persistence (Composite L2)
+// Author: Ala Dabat
+// Version: 2026-01-15 (v2)
+// Platform: Microsoft Defender XDR Advanced Hunting (MDE)
+// Tables: DeviceProcessEvents (required), DeviceRegistryEvents (optional), DeviceImageLoadEvents (optional)
+// MITRE: T1546.003 (WMI Event Subscription), T1047 (WMI), TA0003 (Persistence)
+// Status: PRODUCTION READY
+// ============================================================================
+let lookback = 14d; // Persistence needs longer lookback
+
+let PersistTokens  = dynamic(["__eventfilter","__eventconsumer","__filtertoconsumerbinding"]);
+let PersistTooling = dynamic(["register-wmievent","set-wmiinstance","mofcomp.exe","root/subscription"]);
+
+DeviceProcessEvents
+| where Timestamp >= ago(lookback)
+| where ProcessCommandLine has_any (PersistTokens)
+| where ProcessCommandLine has_any (PersistTooling) or FileName =~ "mofcomp.exe"
+| extend 
+    Cmd = ProcessCommandLine, 
+    Proc = FileName
+| extend
+    HasConsumerType = toint(Cmd has_any ("activescripteventconsumer","commandlineeventconsumer")),
+    HasScriptHint   = toint(Cmd has_any ("vbscript","jscript","scripttext"))
+| extend Severity = case(
+    HasConsumerType == 1 and HasScriptHint == 1, "HIGH",
+    HasConsumerType == 1 or  HasScriptHint == 1, "MEDIUM",
+    "LOW"
+)
+| extend HunterDirectives = case(
+    Severity == "HIGH",   "HIGH: WMI Subscription created with Script Consumer. Inspect root\\subscription immediately.",
+    Severity == "MEDIUM", "MEDIUM: WMI Persistence artifacts observed. Validate Management Tooling.",
+    "LOW"
+)
+| project Timestamp, Severity, DeviceName, DeviceId, AccountName, Proc, Cmd, HunterDirectives
+| order by Severity desc
