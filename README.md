@@ -26,137 +26,79 @@ This repository documents a **deliberate, practical methodology** for building t
 
 ## Core Philosophy (TL;DR)
 
-> **Start with the minimum truth required for the attack to exist.**  
-> Everything else is reinforcement — not dependency.
+> **Start with the minimum truth required for the attack to exist.** > Everything else is reinforcement — not dependency.
 
 ---
 
 ## The Detection Maturity Model I Use
 
 ### 1. Reductive Baseline (Truth First)
-
-Every attack has a **minimum condition that must be true**.
-
-Examples:
-- LSASS credential access → *LSASS must be accessed*
-- Service persistence → *A service must be created or modified*
-- DLL sideloading → *A DLL must be written AND loaded*
-
+Every attack has a **minimum condition that must be true**.  
 If this condition is not met, the attack is **not real**.
-
----
+* *Example:* LSASS credential access → *LSASS must be accessed.*
 
 ### 2. Composite L2 Hunts (Default)
-
-Most attacks **do not require full behavioural chains**.
-
-Instead, we group **related high-signal indicators** into **composite hunts** that:
-- Share a clear attack goal
-- Use a single telemetry source (where possible)
-- Are explainable to L2 analysts
-- Generate **actionable investigations**
-
-This is where **most threat hunting should live**.
-
----
+Most attacks do not require full behavioural chains. We group **related high-signal indicators** into **composite hunts** that use a single telemetry source where possible. This is where **most threat hunting should live**.
 
 ### 3. Reinforcement (Scoring, Context, Rarity)
-
-Once the baseline truth is met, we **reinforce confidence** using:
-
-- Parent/child relationships
-- Network proximity
-- File paths
-- Rarity / prevalence
-- Timing correlation
-
-Reinforcement **improves fidelity** — it should never be required for truth.
-
----
+Once the baseline truth is met, we **reinforce confidence** using parent/child relationships, network proximity, or rarity. Reinforcement **improves fidelity** — it should never be required for detection.
 
 ### 4. Behavioural Chains (Used Sparingly)
-
-Behavioural correlation is **only used when an attack cannot exist without it**.
-
-This is the exception — not the rule.
+Behavioural correlation is **only used when an attack cannot exist without it** (e.g., DLL Sideloading).
 
 ---
 
-## Composite L2 Hunt Categories (What SOCs Actually Need)
+## The Composite Portfolio: Top 10 High-Fidelity Hunts
 
-| Category | Why It Matters | Telemetry |
-|--------|---------------|-----------|
-| LSASS Interaction | Credential theft is universal | Process / Handle Access |
-| Service Creation / Modification | High-ROI persistence | Process + Registry |
-| Account Manipulation | Auditors & blue teams expect it | Process / Identity |
-| Archive & Staging | Pre-exfiltration signal | Process |
-| LOLBin Ingress | Initial access & payload delivery | Process |
+This repository contains **10 validated Composite Rules** that cover the critical phases of the kill chain. Each rule is designed to be **Production Ready** with low noise.
 
-Each category is implemented as **L2 or L2.5 composite hunts** with:
-- Clear intent
-- Low noise
-- Built-in Hunter Directives
+| Category | Rule Name | MITRE | Why It Matters |
+| :--- | :--- | :--- | :--- |
+| **Persistence** | **WMI Event Subscription & Consumer** | T1546.003 | Detects fileless persistence via `scrcons.exe` (e.g., Yeabots, Empire). |
+| **Defense Evasion** | **LOLBin Chaining & Proxy Execution** | T1218 | Detects `rundll32`, `regsvr32` used to bypass controls. |
+| **Exfiltration** | **Archive Staging (Smash & Grab)** | T1560 | Detects rapid collection and compression of data (`7z`, `rar`) before exfil. |
+| **Privilege Escalation** | **Account Manipulation (User Add)** | T1098 | Detects unauthorized user creation or group modification. |
+| **Cloud Identity** | **OAuth Illicit App Consent** | T1528 | **(Cloud)** Detects malicious applications requesting high-risk scopes. |
+| **Credential Access** | **NTDS.dit / Active Directory Dumping** | T1003.003 | **(Critical)** Detects attempts to access the AD database via `vssadmin` or `ntdsutil`. |
+| **Lateral Movement** | **SMB / Named Pipe Impersonation** | T1021.002 | Detects incoming 445 traffic spawning command shells (PsExec behavior). |
+| **Defense Evasion** | **DLL Sideloading (Image Loads)** | T1574.002 | Detects signed binaries loading unsigned DLLs from writable paths. |
+| **Impact** | **Shadow Copy Deletion** | T1490 | **(Ransomware)** Detects precursor activity to encryption. |
+| **Credential Access** | **Kerberoasting (Encryption Downgrade)** | T1558.003 | Detects service ticket requests using weak encryption (RC4/0x17). |
 
 ---
 
 ## Built-In Hunter Directives (Non-Negotiable)
 
-Every hunt produces **guidance alongside results**, not after.
+Every hunt produces **guidance alongside results**, not after. A dedicated `HunterDirective` column is hardcoded into every query output.
 
-Directives answer:
-- Why this fired
-- What makes it suspicious
-- What to check next
-- When to escalate
+**Directives answer:**
+1.  **Why** this fired (Context).
+2.  **What** makes it suspicious (Risk Score).
+3.  **What** to check next (Triage Step).
 
-This ensures:
-- Junior analysts can triage confidently
-- Senior analysts don’t re-investigate basics
-- Knowledge is encoded into the detection itself
+*Example Output:*
+> *"HIGH SEVERITY: scrcons.exe loaded script engine AND beaconed to network. Immediate Action: Check for decoded payload in WMI Class."*
 
 ---
 
-## When Behavioural Detection *Is* Required (One Justified Example)
+## Logic Visualization: Why "Composite" Matters
 
-### Example: DLL Sideloading (Search Order Hijacking)
-
-**MITRE:** T1574.001  
-**Why this example:**  
-DLL sideloading **cannot be confirmed from a single signal**.
-
----
-
-### Why L2 Alone Is Insufficient
-
-| Signal | Alone | Verdict |
-|-----|------|--------|
-| DLL dropped to writable path | Common | ❌ |
-| DLL loaded by signed binary | Normal | ❌ |
-
-**The attack is only true when both occur together.**
-
----
-
-### Minimum Behavioural Truth
-
-| Step | Required | Reason |
-|----|----|------|
-| DLL written to attacker-controlled path | ✅ | Establishes payload |
-| Loaded by legitimate binary | ✅ | Confirms hijack |
-| Persistence / Network | ❌ Optional | Reinforcement only |
-
----
-
-### Behavioural Chain (Justified)
+The diagram below illustrates **DLL Sideloading** — a technique where single events are insufficient, justifying the use of a Behavioural Chain.
 
 ```mermaid
 graph LR
-A[DLL Written to Writable Path] --> B[Signed Binary Loads DLL]
-B --> C[Optional Persistence]
-B --> D[Optional Network]
+    subgraph "The Noise Problem"
+    A[DLL dropped to writable path] -->|Too Common| Fail[False Positive]
+    B[Signed Binary Loads DLL] -->|Standard OS Behavior| Fail
+    end
 
+    subgraph "The Composite Solution"
+    C[Event 1: DLL Write (Temp/Public)] --> D{Correlation Time Window}
+    E[Event 2: Signed Binary Load] --> D
+    D -->|Match| F[High Confidence Alert]
+    F --> G[Check Network/Persistence]
+    end
+
+    style Fail fill:#ff9999,stroke:#333,stroke-width:2px
+    style F fill:#99ff99,stroke:#333,stroke-width:2px
 ```
-
-
-
-
