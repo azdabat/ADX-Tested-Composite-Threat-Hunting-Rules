@@ -161,3 +161,60 @@ flowchart LR
         E --> F[High Confidence Sideload]
         F --> G[Reinforce with Context]
     end
+```
+
+## Rarity & Organisational Prevalence (Used Correctly)
+
+Rarity is **not** a detection trigger.  
+It is a **prioritisation and confidence amplifier**.
+
+In this methodology, **detection is driven by attack truth**, not by how uncommon an event is.  
+Organisational prevalence is applied **only after** the baseline condition of an attack has been met.
+
+> **If the minimum truth of the attack is not satisfied, rarity is irrelevant.**  
+> **If the minimum truth *is* satisfied, rarity helps decide urgency and scope.**
+
+### How Rarity Is Applied
+
+Rarity is used in three safe, SOC-real ways:
+
+### 1. Command / Behaviour Prevalence  
+**Question:** *How many hosts in this organisation perform this exact behaviour?*
+
+- Low prevalence (1–2 hosts) → likely targeted activity  
+- High prevalence (many hosts) → possible tooling, deployment, or admin activity  
+
+This is used to **prioritise triage**, not suppress alerts.
+
+### 2. Parent / Actor Prevalence  
+**Question:** *Who normally performs this action in this environment?*
+
+- LOLBins launched by unusual parents (e.g. Office, WMI, script engines)  
+- Privileged actions executed by unexpected users or service accounts  
+
+This often surfaces **contextual malice** even when the binary itself is common.
+
+### 3. Burst / Radius Prevalence  
+**Question:** *How widely and how fast did this appear?*
+
+- Single host → targeted intrusion  
+- Multiple hosts in a short window → automation, lateral movement, or policy abuse  
+
+This is especially effective for persistence, service creation, and credential access.
+
+### What Rarity Is *Not* Used For
+
+- Rarity is **never** a hard filter  
+- Rarity does **not** determine whether an alert exists  
+- Dangerous actions (e.g. LSASS access, illicit OAuth grants) are **always surfaced**, regardless of prevalence  
+
+### Design Principle
+
+> **Rarity decides how fast we respond — not whether we respond.**
+
+This ensures:
+- High-risk behaviour is never suppressed
+- Analysts are not flooded with low-value noise
+- Targeted attacks stand out without brittle logic
+
+Rarity strengthens detection — it never replaces understanding.
