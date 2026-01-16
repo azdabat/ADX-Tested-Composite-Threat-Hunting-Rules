@@ -8,97 +8,156 @@
 
 ## Why This Repository Exists
 
-Most SOCs fail at threat hunting not because they lack tools, but because:
+Most SOCs struggle with threat hunting not because they lack tools, but because:
 
 - Detections are **over-engineered**
 - Behavioural chains are **forced where they are not required**
-- Analysts are flooded with **noise disguised as intelligence**
-- Rules are written without regard for **operational reality**
+- Analysts are overwhelmed by **noise disguised as intelligence**
+- Rules are written without regard for **SOC operating reality**
 
-This repository documents a **deliberate, practical methodology** for building threat hunts that:
+This repository documents a **deliberate, operationally grounded methodology** for threat hunting that:
 
-- Scale to real SOC teams
-- Preserve signal fidelity
-- Reduce analyst fatigue
-- Use behavioural logic **only when it is genuinely required**
+- Scales to real SOC teams
+- Preserves signal fidelity
+- Reduces analyst fatigue
+- Applies behavioural correlation **only when the attack requires it**
 
 ---
 
 ## Core Philosophy (TL;DR)
 
-> **Start with the minimum truth required for the attack to exist.** > Everything else is reinforcement — not dependency.
+> **Start with the minimum truth required for the attack to exist.**  
+> Everything else is reinforcement — not dependency.
+
+If the baseline truth is not met, the attack **is not real**.
 
 ---
 
-## The Detection Maturity Model I Use
+## Detection Maturity Model Used
 
 ### 1. Reductive Baseline (Truth First)
-Every attack has a **minimum condition that must be true**.  
-If this condition is not met, the attack is **not real**.
-* *Example:* LSASS credential access → *LSASS must be accessed.*
 
-### 2. Composite L2 Hunts (Default)
-Most attacks do not require full behavioural chains. We group **related high-signal indicators** into **composite hunts** that use a single telemetry source where possible. This is where **most threat hunting should live**.
+Every attack technique has a **minimum condition that must be true**.
 
-### 3. Reinforcement (Scoring, Context, Rarity)
-Once the baseline truth is met, we **reinforce confidence** using parent/child relationships, network proximity, or rarity. Reinforcement **improves fidelity** — it should never be required for detection.
+If that condition is not met, the detection should not exist.
 
-### 4. Behavioural Chains (Used Sparingly)
-Behavioural correlation is **only used when an attack cannot exist without it** (e.g., DLL Sideloading).
+**Examples:**
+- LSASS credential theft → *LSASS must be accessed*
+- Kerberoasting → *Service tickets must be requested using weak encryption*
+- OAuth abuse → *A cloud app must request high-risk scopes*
+
+This prevents speculative or assumption-driven hunting.
 
 ---
 
-## The Composite Portfolio: Top 10 High-Fidelity Hunts
+### 2. Composite L2 / L2.5 Hunts (Default)
 
-This repository contains **10 validated Composite Rules** that cover the critical phases of the kill chain. Each rule is designed to be **Production Ready** with low noise.
+Most attacks do **not** require full behavioural chains.
 
-| Category | Rule Name | MITRE | Why It Matters |
-| :--- | :--- | :--- | :--- |
-| **Persistence** | **WMI Event Subscription & Consumer** | T1546.003 | Detects fileless persistence via `scrcons.exe` (e.g., Yeabots, Empire). |
-| **Defense Evasion** | **LOLBin Chaining & Proxy Execution** | T1218 | Detects `rundll32`, `regsvr32` used to bypass controls. |
-| **Exfiltration** | **Archive Staging (Smash & Grab)** | T1560 | Detects rapid collection and compression of data (`7z`, `rar`) before exfil. |
-| **Privilege Escalation** | **Account Manipulation (User Add)** | T1098 | Detects unauthorized user creation or group modification. |
-| **Cloud Identity** | **OAuth Illicit App Consent** | T1528 | **(Cloud)** Detects malicious applications requesting high-risk scopes. |
-| **Credential Access** | **NTDS.dit / Active Directory Dumping** | T1003.003 | **(Critical)** Detects attempts to access the AD database via `vssadmin` or `ntdsutil`. |
-| **Lateral Movement** | **SMB / Named Pipe Impersonation** | T1021.002 | Detects incoming 445 traffic spawning command shells (PsExec behavior). |
-| **Defense Evasion** | **DLL Sideloading (Image Loads)** | T1574.002 | Detects signed binaries loading unsigned DLLs from writable paths. |
-| **Impact** | **Shadow Copy Deletion** | T1490 | **(Ransomware)** Detects precursor activity to encryption. |
-| **Credential Access** | **Kerberoasting (Encryption Downgrade)** | T1558.003 | Detects service ticket requests using weak encryption (RC4/0x17). |
+Instead, this repository focuses on **Composite Hunts** that:
+- Group **related high-signal indicators**
+- Prefer **single telemetry sources** where possible
+- Use minimal joins only when unavoidable
+
+This is where **most effective threat hunting lives**.
+
+---
+
+### 3. Reinforcement (Confidence, Not Dependency)
+
+Once baseline truth is met, confidence is increased using:
+- parent / child execution context
+- suspicious paths or arguments
+- network proximity
+- rarity / prevalence
+
+Reinforcement:
+- improves fidelity
+- reduces noise
+- **never defines the attack**
+
+---
+
+### 4. Behavioural Chains (Used Sparingly)
+
+Behavioural correlation is used **only when the attack cannot exist without it**.
+
+**Example:** DLL sideloading  
+A DLL drop alone is benign.  
+A DLL load alone is benign.  
+The attack is only true when **both occur together**.
+
+---
+
+## Composite Threat Hunt Portfolio
+
+This repository is organised around **Composite Hunts** covering the most critical attack surfaces across endpoint, identity, and cloud environments.
+
+### Implemented & Active Composite Rules
+
+| Attack Surface | Composite Hunt | MITRE | Why It Matters |
+|---------------|---------------|-------|----------------|
+| **Credential Access** | **LSASS Access / Dump Attempts** | T1003.001 | Core SOC expectation; high signal, low noise |
+| **Credential Access** | **NTDS.dit / AD Database Access** | T1003.003 | Domain compromise precursor |
+| **Credential Access** | **Kerberoasting (Weak Encryption)** | T1558.003 | Detects RC4 / 0x17 downgrade abuse |
+| **Persistence** | **WMI Event Subscription & Consumer** | T1546.003 | Fileless persistence via `scrcons.exe` |
+| **Defense Evasion** | **LOLBin Proxy Execution** | T1218 | `rundll32`, `regsvr32`, `mshta` abuse |
+| **Defense Evasion** | **DLL Sideloading (Minimal Chain)** | T1574.002 | Correlation only where structurally required |
+| **Lateral Movement** | **SMB / Named Pipe Execution** | T1021.002 | PsExec-style behaviour |
+| **Privilege Escalation** | **Account Manipulation (User / Group Changes)** | T1098 | Persistence, audit-critical |
+| **Exfiltration Prep** | **Archive + Staging (Smash & Grab)** | T1560 | Data staging before exfiltration |
+| **Cloud Identity** | **OAuth Illicit App Consent** | T1528 | Cloud persistence & data access |
+
+---
+
+### Planned Composite Additions (Roadmap)
+
+These will follow the same reductive → composite → reinforcement model:
+
+| Attack Surface | Planned Hunt | MITRE | Rationale |
+|---------------|-------------|-------|-----------|
+| Persistence | Service Creation / Modification Abuse | T1543.003 | High attacker ROI, low noise |
+| Impact | Shadow Copy Deletion | T1490 | Ransomware precursor |
+| Persistence | Scheduled Task Abuse (User Context) | T1053.005 | Common execution & persistence |
+| Credential Access | SAM / Registry Hive Dump Attempts | T1003.002 | Complements LSASS coverage |
+| Cloud Activity | OAuth Token Abuse / Graph API Misuse | T1528 | Post-consent cloud exploitation |
 
 ---
 
 ## Built-In Hunter Directives (Non-Negotiable)
 
-Every hunt produces **guidance alongside results**, not after. A dedicated `HunterDirective` column is hardcoded into every query output.
+Every composite hunt produces **guidance alongside results**, not after.
 
-**Directives answer:**
-1.  **Why** this fired (Context).
-2.  **What** makes it suspicious (Risk Score).
-3.  **What** to check next (Triage Step).
+Each rule outputs a `HunterDirective` (or equivalent) that answers:
 
-*Example Output:*
-> *"HIGH SEVERITY: scrcons.exe loaded script engine AND beaconed to network. Immediate Action: Check for decoded payload in WMI Class."*
+1. **Why** this fired (baseline truth)
+2. **What** reinforces confidence
+3. **What** to do next
+
+**Example:**
+> *HIGH: LSASS accessed by non-AV process using dump-related command line.  
+> Action: Validate tool legitimacy, scope for lateral movement, escalate to L3.*
 
 ---
 
-## Logic Visualization: Why "Composite" Matters
+## Why Composite Hunts Matter (Example)
 
-The diagram below illustrates **DLL Sideloading** — a technique where single events are insufficient, justifying the use of a Behavioural Chain.
+DLL sideloading is a technique that **cannot be confirmed from a single event**.
 
 ```mermaid
-graph LR
-    subgraph "The Noise Problem"
-    A[DLL dropped to writable path] -->|Too Common| Fail[False Positive]
-    B[Signed Binary Loads DLL] -->|Standard OS Behavior| Fail
+flowchart LR
+    subgraph Noise
+        A[DLL written to writable path]
+        B[Signed binary loads DLL]
+        A --> X[Too common alone]
+        B --> X
     end
 
-    subgraph "The Composite Solution"
-    C[Event 1: DLL Write (Temp/Public)] --> D{Correlation Time Window}
-    E[Event 2: Signed Binary Load] --> D
-    D -->|Match| F[High Confidence Alert]
-    F --> G[Check Network/Persistence]
+    subgraph Composite_Truth
+        C[DLL written to Temp / Public]
+        D[Signed binary loads DLL from same path]
+        C --> E{Time Window Correlation}
+        D --> E
+        E --> F[High Confidence Sideload]
+        F --> G[Reinforce with Context]
     end
-
-    style Fail fill:#ff9999,stroke:#333,stroke-width:2px
-    style F fill:#99ff99,stroke:#333,stroke-width:2px
-```
