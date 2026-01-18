@@ -1,0 +1,62 @@
+// ============================================================================
+// COMPOSITE HUNT: L2_OAuth_Token_Theft_Anomaly (LOW NOISE, MORE COVERAGE)
+// AUTHOR: Ala Dabat
+// BASELINE TRUTH: Successful sign-in occurred for a user+app.
+// REINFORCEMENT: NewCountry+NewASN (Tier1) OR (NewASN+NewUA+WeakAuth) (Tier2)
+// DATA: SigninLogs
+// MITRE: T1550.001 (primary), T1078 (adjacent)
+// ============================================================================
+let BaselineWindow = 30d;
+let RecentWindow   = 7d;
+let MinBaseline    = 6;
+let ScoreThreshold = 8;
+
+let Baseline =
+SigninLogs
+| where TimeGenerated between (ago(BaselineWindow) .. ago(RecentWindow))
+| where tostring(ResultType) in ("0","") or isempty(ResultType)
+| extend Country=tostring(LocationDetails.countryOrRegion),
+         ASN=tostring(NetworkLocationDetails.autonomousSystemNumber),
+         UA=tostring(UserAgent),
+         UA_Family=toupper(strcat_array(array_slice(split(UA," "),0,1),""))
+| summarize
+    BaselineCount=count(),
+    Countries=make_set(Country, 25),
+    ASNs=make_set(ASN, 25),
+    UAFamilies=make_set(UA_Family, 25)
+  by UserPrincipalName, AppId, AppDisplayName
+| where BaselineCount >= MinBaseline;
+
+SigninLogs
+| where TimeGenerated >= ago(RecentWindow)
+| where tostring(ResultType) in ("0","") or isempty(ResultType)
+| extend Country=tostring(LocationDetails.countryOrRegion),
+         ASN=tostring(NetworkLocationDetails.autonomousSystemNumber),
+         UA=tostring(UserAgent),
+         UA_Family=toupper(strcat_array(array_slice(split(UA," "),0,1),""))
+| join kind=inner Baseline on UserPrincipalName, AppId
+| extend IsNewCountry = iif(not(Country in (Countries)),1,0),
+         IsNewASN     = iif(not(ASN in (ASNs)),1,0),
+         IsNewUA      = iif(not(UA_Family in (UAFamilies)),1,0),
+         WeakAuth     = iif(tostring(AuthenticationRequirement) =~ "singleFactorAuthentication", 1, 0)
+| extend Score =
+      (IsNewCountry*3)
+    + (IsNewASN*3)
+    + (IsNewUA*2)
+    + (WeakAuth*2)
+| where
+    // Tier1: very low noise
+    (IsNewCountry==1 and IsNewASN==1)
+    // Tier2: still pretty low-noise, extends coverage
+    or (IsNewASN==1 and IsNewUA==1 and WeakAuth==1 and Score >= ScoreThreshold)
+| extend Severity = case(IsNewCountry==1 and IsNewASN==1 and Score>=10, "HIGH", "MEDIUM")
+| extend HunterDirective = strcat(
+  "ACTION: token/session misuse triage | ",
+  "CONTEXT: User=", UserPrincipalName, " App=", AppDisplayName,
+  " Country=", Country, " ASN=", ASN, " UA=", UA_Family,
+  " MFA=", tostring(AuthenticationRequirement), " Score=", tostring(Score), " | ",
+  "PIVOT: confirm travel/VPN; if unconfirmed revoke sessions/refresh tokens and check OfficeActivity/Graph access."
+)
+| project TimeGenerated, Severity, Score, UserPrincipalName, AppDisplayName, AppId,
+          Country, ASN, IPAddress, UA_Family, AuthenticationRequirement, HunterDirective
+| order by Score desc, TimeGenerated desc
