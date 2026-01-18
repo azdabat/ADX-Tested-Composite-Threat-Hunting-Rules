@@ -1,0 +1,78 @@
+// ============================================================================
+// COMPOSITE HUNT: L2_OAuth_Consent_Abuse (FIXED PARSING, LOW-NOISE)
+// AUTHOR: Ala Dabat
+// BASELINE TRUTH: Successful consent/grant event occurred.
+// REINFORCEMENT: High-risk scopes/roles, admin consent, suspicious UA, publisher dampening.
+// DATA: AuditLogs (+ optional SigninLogs/SP logs if you later enrich)
+// MITRE: T1528 (primary), T1098 (adjacent)
+// ============================================================================
+let ConsentLookback = 30d;
+let RiskThreshold   = 18;
+
+let SafePublishers = dynamic(["Microsoft Corporation","Microsoft Azure","Microsoft Online Services"]);
+let SuspiciousUAs  = dynamic(["python","curl","wget","postman","insomnia","powershell","java","go-http","okhttp"]);
+let HighRiskExact  = dynamic([
+  "Application.ReadWrite.All","AppRoleAssignment.ReadWrite.All","RoleManagement.ReadWrite.Directory",
+  "ServicePrincipal.ReadWrite.All","Directory.ReadWrite.All","Directory.AccessAsUser.All",
+  "Mail.Read","Mail.ReadWrite","Mail.Send","Files.ReadWrite.All","Sites.ReadWrite.All","Sites.FullControl.All",
+  "User.ReadWrite.All","Group.ReadWrite.All"
+]);
+let HighRiskTailRegex = @"(ReadWrite\.All|FullControl\.All|AccessAsUser\.All)$";
+
+AuditLogs
+| where TimeGenerated >= ago(ConsentLookback)
+| where Result =~ "success"
+| where OperationName has_any ("Consent","permission grant","delegated permission","app role assignment")
+| extend T = TargetResources[0]
+| extend AppName=tostring(T.displayName), AppId=tostring(T.id)
+| extend Initiator=tostring(InitiatedBy.user.userPrincipalName),
+         IP=tostring(InitiatedBy.user.ipAddress),
+         UA=tostring(InitiatedBy.user.userAgent)
+| mv-expand MP = T.modifiedProperties
+| extend Prop=tostring(MP.displayName), New=tostring(MP.newValue)
+| summarize
+    Created=min(TimeGenerated),
+    Publisher=anyif(trim('"',New), Prop == "ConsentContext.PublisherName"),
+    IsAdmin=max(iif(Prop == "ConsentContext.OnBehalfOfAll" and tolower(New) has "true", 1, 0)),
+    Delegated=anyif(New, Prop == "Scope"),
+    AppRoles=anyif(New, Prop == "AppRoles"),
+    Initiator=any(Initiator),
+    IP=any(IP),
+    UA=any(UA)
+  by AppId, AppName
+| extend DelegatedClean = replace_string(replace_string(tostring(Delegated), '"', ""), "\\n", " "),
+         AppRolesClean  = replace_string(replace_string(tostring(AppRoles),  '"', ""), "\\n", " ")
+| extend Perms = array_concat(split(DelegatedClean, " "), split(AppRolesClean, " "))
+| mv-expand Perm = Perms to typeof(string)
+| where isnotempty(Perm)
+| extend IsHighRisk = iif(Perm in (HighRiskExact) or Perm matches regex HighRiskTailRegex, 1, 0)
+| summarize
+    Created=any(Created),
+    Publisher=any(Publisher),
+    IsAdmin=any(IsAdmin),
+    Initiator=any(Initiator),
+    IP=any(IP),
+    UA=any(UA),
+    HighRiskCount=sum(IsHighRisk),
+    HighRiskPerms=make_set_if(Perm, IsHighRisk==1, 50)
+  by AppId, AppName
+| extend IsSuspiciousUA = iif(tolower(UA) has_any (SuspiciousUAs), 1, 0),
+         IsSafePublisher = iif(Publisher in (SafePublishers), 1, 0)
+| extend Score =
+      0
+    + (HighRiskCount * 10)
+    + (IsAdmin * 15)
+    + (IsSuspiciousUA * 12)
+    + (iif(IsSafePublisher, -20, 3))
+| where Score >= RiskThreshold
+| extend Severity = case(Score >= 45, "CRITICAL", Score >= 30, "HIGH", "MEDIUM")
+| extend HunterDirective = strcat(
+  "ACTION: ", Severity, " illicit consent review | ",
+  "CONTEXT: App='", AppName, "' AdminConsent=", tostring(IsAdmin),
+  " HighRiskPerms=", tostring(HighRiskPerms),
+  " Initiator=", tostring(Initiator), " IP=", tostring(IP),
+  " UA=", substring(tostring(UA),0,60), " | ",
+  "PIVOT: validate app owner/publisher; if unapproved revoke consent + search SigninLogs/SP sign-ins for AppId."
+)
+| project Created, Severity, Score, AppName, AppId, Publisher, Initiator, IP, HighRiskCount, HighRiskPerms, HunterDirective
+| order by Score desc
