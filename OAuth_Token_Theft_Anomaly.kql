@@ -1,62 +1,119 @@
 // ============================================================================
-// COMPOSITE HUNT: L2_OAuth_Token_Theft_Anomaly (LOW NOISE, MORE COVERAGE)
-// AUTHOR: Ala Dabat
-// BASELINE TRUTH: Successful sign-in occurred for a user+app.
-// REINFORCEMENT: NewCountry+NewASN (Tier1) OR (NewASN+NewUA+WeakAuth) (Tier2)
-// DATA: SigninLogs
-// MITRE: T1550.001 (primary), T1078 (adjacent)
+// COMPOSITE HUNT (L2/L2.5) — OAuth Token / Session Misuse (Geo + ASN + UA)
+// Author: Ala Dabat
+//
+// BASELINE TRUTH (Minimum Required):
+//   - Successful sign-in occurred for (UserPrincipalName, AppId).
+//
+// REINFORCEMENT (Reduces Noise):
+//   - "New Country + New ASN" (Tier 1) = very low-noise indicator of stolen token/session.
+//   - "New ASN + New UA family + WeakAuth" (Tier 2) = expands coverage while limiting travel/VPN noise.
+//   - Requires baseline history to avoid “first ever sign-in” false positives.
+//
+// WHY COMPOSITE:
+//   Single anomalies are noisy (travel, ISP changes, corp VPN).
+//   This composite requires convergence of anomalies to represent “minimum truth + reinforcement”.
+//
+// Data:
+//   - SigninLogs (required)
+//
+// MITRE:
+//   - T1550.001 (Use Alternate Authentication Material: Application Access Token / Session)
+//   - T1078 (Valid Accounts) (contextual)
+//
+// NOTES (Noise Controls):
+//   - Baseline window excludes the recent window (prevents poisoning baseline).
+//   - Requires MinBaselineEvents.
+//   - Uses set_has_element() for dynamic set membership (KQL-safe).
 // ============================================================================
-let BaselineWindow = 30d;
-let RecentWindow   = 7d;
-let MinBaseline    = 6;
-let ScoreThreshold = 8;
+
+let TokenBaselineWindow = 30d;
+let TokenRecentWindow   = 7d;
+let MinBaselineEvents   = 5;   // raise if your tenant is noisy
+let ScoreThresholdTier2 = 7;   // Tier 2 threshold gate
+
+// Optional: exclude known automation/service accounts if they skew UA/ASN heavily.
+// let ExcludedUsers = dynamic(["svc-automation@contoso.com"]);
 
 let Baseline =
 SigninLogs
-| where TimeGenerated between (ago(BaselineWindow) .. ago(RecentWindow))
-| where tostring(ResultType) in ("0","") or isempty(ResultType)
-| extend Country=tostring(LocationDetails.countryOrRegion),
-         ASN=tostring(NetworkLocationDetails.autonomousSystemNumber),
-         UA=tostring(UserAgent),
-         UA_Family=toupper(strcat_array(array_slice(split(UA," "),0,1),""))
+| where TimeGenerated between (ago(TokenBaselineWindow) .. ago(TokenRecentWindow))
+| where tostring(ResultType) in ("0","") or isempty(ResultType)   // success
+// | where UserPrincipalName !in (ExcludedUsers)
+| extend
+    Country   = tostring(LocationDetails.countryOrRegion),
+    ASN       = tostring(NetworkLocationDetails.autonomousSystemNumber),
+    UA        = tostring(UserAgent)
+| where isnotempty(UserPrincipalName) and isnotempty(AppId)
+| where isnotempty(Country) and isnotempty(ASN) and isnotempty(UA)
+| extend UA_Family = toupper(strcat_array(array_slice(split(UA, " "), 0, 1), ""))
 | summarize
-    BaselineCount=count(),
-    Countries=make_set(Country, 25),
-    ASNs=make_set(ASN, 25),
-    UAFamilies=make_set(UA_Family, 25)
+    BaselineCount      = count(),
+    BaselineCountries  = make_set(Country, 25),
+    BaselineASNs       = make_set(ASN, 25),
+    BaselineUAFamilies = make_set(UA_Family, 25)
   by UserPrincipalName, AppId, AppDisplayName
-| where BaselineCount >= MinBaseline;
+| where BaselineCount >= MinBaselineEvents;
 
 SigninLogs
-| where TimeGenerated >= ago(RecentWindow)
-| where tostring(ResultType) in ("0","") or isempty(ResultType)
-| extend Country=tostring(LocationDetails.countryOrRegion),
-         ASN=tostring(NetworkLocationDetails.autonomousSystemNumber),
-         UA=tostring(UserAgent),
-         UA_Family=toupper(strcat_array(array_slice(split(UA," "),0,1),""))
+| where TimeGenerated >= ago(TokenRecentWindow)
+| where tostring(ResultType) in ("0","") or isempty(ResultType)   // success
+// | where UserPrincipalName !in (ExcludedUsers)
+| extend
+    Country   = tostring(LocationDetails.countryOrRegion),
+    ASN       = tostring(NetworkLocationDetails.autonomousSystemNumber),
+    UA        = tostring(UserAgent),
+    IPAddress = tostring(IPAddress),
+    ClientAppUsed = tostring(ClientAppUsed),
+    AuthReq   = tostring(AuthenticationRequirement)
+| where isnotempty(UserPrincipalName) and isnotempty(AppId)
+| extend UA_Family = toupper(strcat_array(array_slice(split(UA, " "), 0, 1), ""))
 | join kind=inner Baseline on UserPrincipalName, AppId
-| extend IsNewCountry = iif(not(Country in (Countries)),1,0),
-         IsNewASN     = iif(not(ASN in (ASNs)),1,0),
-         IsNewUA      = iif(not(UA_Family in (UAFamilies)),1,0),
-         WeakAuth     = iif(tostring(AuthenticationRequirement) =~ "singleFactorAuthentication", 1, 0)
+// IMPORTANT: membership checks against dynamic sets must use set_has_element()
+| extend
+    IsNewCountry = iif(not(set_has_element(BaselineCountries,  Country)),    1, 0),
+    IsNewASN     = iif(not(set_has_element(BaselineASNs,       ASN)),        1, 0),
+    IsNewUA      = iif(not(set_has_element(BaselineUAFamilies, UA_Family)),  1, 0),
+    WeakAuth     = iif(AuthReq =~ "singleFactorAuthentication", 1, 0)
+// Score: simple, explainable, interview-safe
 | extend Score =
-      (IsNewCountry*3)
-    + (IsNewASN*3)
-    + (IsNewUA*2)
-    + (WeakAuth*2)
+      (IsNewCountry * 3)
+    + (IsNewASN     * 3)
+    + (IsNewUA      * 2)
+    + (WeakAuth     * 2)
+// Composite gates:
+// Tier 1 = strongest low-noise minimum (new geo + new network)
+// Tier 2 = still constrained, expands coverage (new ASN + new UA + weak auth + score gate)
 | where
-    // Tier1: very low noise
-    (IsNewCountry==1 and IsNewASN==1)
-    // Tier2: still pretty low-noise, extends coverage
-    or (IsNewASN==1 and IsNewUA==1 and WeakAuth==1 and Score >= ScoreThreshold)
-| extend Severity = case(IsNewCountry==1 and IsNewASN==1 and Score>=10, "HIGH", "MEDIUM")
+    (IsNewCountry == 1 and IsNewASN == 1)
+    or (IsNewASN == 1 and IsNewUA == 1 and WeakAuth == 1 and Score >= ScoreThresholdTier2)
+| extend Severity = case(
+      IsNewCountry == 1 and IsNewASN == 1 and Score >= 10, "HIGH",
+      "MEDIUM"
+  )
 | extend HunterDirective = strcat(
-  "ACTION: token/session misuse triage | ",
-  "CONTEXT: User=", UserPrincipalName, " App=", AppDisplayName,
-  " Country=", Country, " ASN=", ASN, " UA=", UA_Family,
-  " MFA=", tostring(AuthenticationRequirement), " Score=", tostring(Score), " | ",
-  "PIVOT: confirm travel/VPN; if unconfirmed revoke sessions/refresh tokens and check OfficeActivity/Graph access."
-)
-| project TimeGenerated, Severity, Score, UserPrincipalName, AppDisplayName, AppId,
-          Country, ASN, IPAddress, UA_Family, AuthenticationRequirement, HunterDirective
+    "ACTION: token/session misuse triage | ",
+    "CONTEXT: User=", UserPrincipalName,
+    " App=", AppDisplayName,
+    " Country=", Country,
+    " ASN=", ASN,
+    " UA=", UA_Family,
+    " Auth=", AuthReq,
+    " Score=", tostring(Score), " | ",
+    "PIVOT: confirm travel/VPN; if unconfirmed revoke sessions/refresh tokens; review mailbox/files/Graph activity."
+  )
+| project
+    TimeGenerated,
+    Severity,
+    Score,
+    UserPrincipalName,
+    AppId,
+    AppDisplayName,
+    Country,
+    ASN,
+    UA_Family,
+    AuthReq,
+    ClientAppUsed,
+    IPAddress,
+    HunterDirective
 | order by Score desc, TimeGenerated desc
