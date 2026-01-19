@@ -26,13 +26,13 @@ let DropExt = dynamic([".exe",".dll",".sys",".bat",".ps1",".vbs",".js",".hta"]);
 
 // Known common service children (suppress obvious noise; tune per tenant)
 let CommonServiceChildren = dynamic([
-  "svchost.exe","dllhost.exe","taskhostw.exe","taskhost.exe","conhost.exe",
+  "svchost.exe","dllhost.exe","taskhostw.exe","taskhost.exe","conhost.exe",    //not including common LOLBINS i.e. svhosts.exe followed by network connection protects fedelity
   "msmpeng.exe","senseir.exe","searchindexer.exe","tiworker.exe"
 ]);
 
 // Optional: allowlist service installs by known management tools (tune)
 let AllowInitiators = dynamic([
-  "ccmexec.exe","sccmagent.exe","intuneManagementExtension.exe","taniumclient.exe",
+  "ccmexec.exe","sccmagent.exe","intuneManagementExtension.exe","taniumclient.exe", //when uncommon service is spawned by services.exe
   "qualysagent.exe","nxlog.exe"
 ]);
 
@@ -42,7 +42,7 @@ let AllowInitiators = dynamic([
 let InboundSMBRPC =
 DeviceNetworkEvents
 | where Timestamp >= ago(Lookback)
-| where ActionType == "InboundConnectionAccepted"
+| where ActionType == "InboundConnectionAccepted"  //convergence is when this uncommon service.exe spawn is followed by inbound SMB or RPC cpnnection. RPC Allow remote network connections to execute local fuction or procedure.
 | where LocalPort in (445, 135)
 | where isnotempty(RemoteIP)
 | project DeviceId, SMBTime=Timestamp, SourceIP=RemoteIP, LocalPort;
@@ -50,14 +50,14 @@ DeviceNetworkEvents
 // -------------------------
 // Signal B: suspicious admin-share write (optional reinforcement)
 // -------------------------
-let AdminShareWrites =
+let AdminShareWrites =                                                            //File drops are not a confirmed anchor for malicious activity, as this may  miss fileless execution for lateral movement i.e. sc.exe can drop binaries without being malicious
 DeviceFileEvents
 | where Timestamp >= ago(Lookback)
 | where tostring(FolderPath) has_any (HighRiskShareMarkers)
 | where isnotempty(FileName)
 | extend LowerName = tolower(FileName)
 | where LowerName has "." and (LowerName endswith_any (DropExt))
-| project DeviceId, WriteTime=Timestamp, DroppedFile=FileName, DroppedPath=FolderPath;
+| project DeviceId, WriteTime=Timestamp, DroppedFile=FileName, DroppedPath=FolderPath; //when files a dropped in high risk markers within a 15 minute window convergence from a normal baseline is highly likely
 
 // -------------------------
 // Baseline Truth: service execution on victim
