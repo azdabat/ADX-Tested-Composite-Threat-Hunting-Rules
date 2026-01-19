@@ -69,7 +69,7 @@ DeviceProcessEvents
 | where InitiatingProcessFileName =~ "services.exe"
 | where not(tolower(FileName) in~ (CommonServiceChildren))
 | where not(tolower(InitiatingProcessFileName) in~ (AllowInitiators))
-| extend SvcCmd = tostring(ProcessCommandLine)
+| extend SvcCmd = tostring(ProcessCommandLine)                                           //baseline truth is services.exe spawning an uncommon child event, but a cumulative narrative is required for certaininty and noise reduction
 | project DeviceId, DeviceName, SvcTime=Timestamp, SvcProc=FileName, SvcCmd, AccountName;
 
 // -------------------------
