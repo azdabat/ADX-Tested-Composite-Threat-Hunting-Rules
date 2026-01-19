@@ -8,6 +8,7 @@
 //   Baseline Truth  : A task is created/changed (schtasks.exe /create or /change)
 //   Reinforcement   : Task action is a script engine OR points to a user-writable path
 //   Noise Control   : Suppress obvious maintenance/updater patterns and Program Files paths
+//   Pivot: If scheduled task runs COM to registry to launch a malicious DLL my registry persistence rule will catch it
 //
 // NOTES:
 //   - This is built for operating reality: tasks are common, but "who/what/where" is not.
@@ -29,7 +30,7 @@ let WritablePaths = dynamic([
 
 // Script/proxy engines commonly launched from task actions (reinforcement)
 let ScriptEngines = dynamic([
-  "powershell.exe","pwsh.exe","cmd.exe","wscript.exe","cscript.exe","mshta.exe","rundll32.exe","regsvr32.exe"
+  "powershell.exe","pwsh.exe","cmd.exe","wscript.exe","cscript.exe","mshta.exe","rundll32.exe","regsvr32.exe" //scheduled tasks launching these from public writable paths is where convergence ends and malicious intent begins
 ]);
 
 // Tenant tuning: common benign task creators (examples; add your own)
@@ -53,16 +54,16 @@ DeviceProcessEvents
 | where Timestamp >= ago(Lookback)
 | where FileName =~ "schtasks.exe"
 | extend Cmd = tolower(ProcessCommandLine)
-| where Cmd has_any ("/create", "/change")    // Minimum truth a user creates a scheduled task not, malicious or taht suspicious yet 
-//
+| where Cmd has_any ("/create", "/change")    // Minimum truth a user creates a scheduled task not, malicious or taht suspicious yet but is a non negotionable starting point for this LOLBIN
+                                              // Adobe, Google, and other updates create thousands of scheduled tasks across an enterprise environment. 
 // Reinforcement extraction
 //
 | extend
     HasTaskAction = iif(Cmd has "/tr" or Cmd has " /tr ", 1, 0),
-    UsesScriptEngine = iif(Cmd has_any (ScriptEngines), 1, 0),
-    UsesWritablePath  = iif(Cmd has_any (WritablePaths), 1, 0),
-    RunsAsSystem      = iif(Cmd has_any ("/ru system"," /ru \"system\""," /ru \"nt authority\\system\"","/ru \"nt authority\\system\""), 1, 0),
-    SuspSchedule      = iif(Cmd has_any ("/sc onlogon","/sc onstart","/sc minute","/sc hourly") or Cmd has "/mo", 1, 0),
+    UsesScriptEngine = iif(Cmd has_any (ScriptEngines), 1, 0),  //this ties into the end of convergence and the start of malicious intent as suspicious script engines launching from user writable paths have a high malicious probability rate
+    UsesWritablePath  = iif(Cmd has_any (WritablePaths), 1, 0),  //Convergence collapses when a scheduled task spawns a malicious process like powershell or other binaries from a user writable path, this is high convergence and malicious intent
+    RunsAsSystem      = iif(Cmd has_any ("/ru system"," /ru \"system\""," /ru \"nt authority\\system\"","/ru \"nt authority\\system\""), 1, 0), // Running suspicious flags or with elevated privilages gives hunters a clear indicators to investigate
+    SuspSchedule      = iif(Cmd has_any ("/sc onlogon","/sc onstart","/sc minute","/sc hourly") or Cmd has "/mo", 1, 0), //re-enforced telemetry showing intent as part of a re-enforced cumulative score increases cetainty while reducing noise
     HiddenTaskHints   = iif(Cmd has_any ("/f","/rl highest","/it","/z"), 1, 0)
 //
 // Minimum Truth gate + reinforcement (composite)
