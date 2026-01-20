@@ -8,7 +8,15 @@
 //   Baseline Truth  : A new/odd service process is created by services.exe (execution step)
 //   Reinforcement   : Correlated inbound SMB/RPC (445/135) and/or admin-share write (.exe/.dll/.sys)
 //   Noise Control   : Suppress common service hosts + allow optional dropped-file requirement gating
-//
+// 1. The attack only happens when there is an intersection between an anomalous process spawning services.exe and an inbound SPC/SMB connection, which is where convergence departs and malicious behaviour begins.
+// 2. Re-enforcement for suspicious share paths, re-enforces confidence but does not re-define the minimum baseline of truth, it only re-enforces risk and score
+// 3. Hunter directives are re-enforcement, gives analysts confidence and direction, while composite framework ensures operational function based first principles, and a top down composite structural decision based on entire attack ecosystems and attacker tradescraft.
+// 4. Burst prevalence is not a direct indicator, but a re-enforcement for priorotization and risk. Low bust could be a targetted attack, while wide bust could be an admin operation or the opposite can be the case.
+// Burst is a severity multiplier. 
+// "Reductive Baseline" -> "Composite" -> "Reinforcement" flow.
+// NOTE: when files a dropped in high risk markers within a 15 minute window convergence from a normal baseline is highly likely
+// File drops are not a confirmed anchor for malicious activity, as this may  miss fileless execution for lateral movement i.e. sc.exe can drop binaries without being malicious
+// 
 // DESIGN INTENT:
 //   - Victim-perspective: detect the target host receiving SMB/RPC then executing via service.
 //   - Supports fileless-ish variants (Impacket) by allowing Service+Network even without file drop.
@@ -27,7 +35,7 @@ let DropExt = dynamic([".exe",".dll",".sys",".bat",".ps1",".vbs",".js",".hta"]);
 // Known common service children (suppress obvious noise; tune per tenant)
 let CommonServiceChildren = dynamic([
   "svchost.exe","dllhost.exe","taskhostw.exe","taskhost.exe","conhost.exe",    //not including common LOLBINS i.e. svhosts.exe followed by network connection protects fedelity
-  "msmpeng.exe","senseir.exe","searchindexer.exe","tiworker.exe"
+  "msmpeng.exe","senseir.exe","searchindexer.exe","tiworker.exe" // this is the baseline of truth, that requires a known "good initiators list" for baseline truth to be anomalous services.exe being launched by suspicious child process but this is not enough
 ]);
 
 // Optional: allowlist service installs by known management tools (tune)
@@ -43,7 +51,7 @@ let InboundSMBRPC =
 DeviceNetworkEvents
 | where Timestamp >= ago(Lookback)
 | where ActionType == "InboundConnectionAccepted"  //convergence is when this uncommon service.exe spawn is followed by inbound SMB or RPC cpnnection. RPC Allow remote network connections to execute local fuction or procedure.
-| where LocalPort in (445, 135)
+| where LocalPort in (445, 135)  //this convergence is what turns baseline truth into something more suspicious within a 15 minute window, inbound RPC or SMB traffic. This single indicator alone means nothing. 
 | where isnotempty(RemoteIP)
 | project DeviceId, SMBTime=Timestamp, SourceIP=RemoteIP, LocalPort;
 
