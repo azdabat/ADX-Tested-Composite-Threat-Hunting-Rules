@@ -1,5 +1,11 @@
-NOTE: 
-My rules are logically production-safe, but final noise tuning requires tenant telemetry and admin workflow context. Without live systems, I validate correctness and attack-truth — operational calibration comes after deployment. Some MINOR syntax issues may exist because these rules were tested in ADX-Docker.
+> [!NOTE]
+> **Operational Calibration & Testing**
+>
+> These detection rules are architected for **logical correctness** and **high-fidelity signal extraction**. Validation was performed in an isolated **ADX-Docker** environment to ensure attack-truth and logic integrity.
+>
+> Please note:
+> * **Baselines:** Final noise tuning and allow-listing require specific tenant telemetry and administrative context.
+> * **Syntax:** Minor syntax variances (e.g., path escaping) may exist due to the difference between Docker-hosted Kusto and live Cloud schemas.
 
 # Threat Hunting Philosophy & Detection Design
 
