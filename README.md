@@ -172,6 +172,72 @@ flowchart LR
     end
 ```
 
+# Architectural Strategy: When to Split vs. Composite  
+## Decision Framework: The **Minimum Truth** Doctrine
+
+This repository follows a strict architectural rule for defining the boundaries of a **Composite Detection**:
+
+- We **do not** group rules by *MITRE Tactic* (“all Persistence in one query”).
+- We group rules by **Attack Surface Ecosystem** (the operational domain where the *same kind* of truth is observable).
+
+A **Composite Rule** enforces context around a **single coherent stream of activity** (same mechanism, same telemetry surface, same “truth”).  
+If the logic must jump across **different execution mediums**, **schemas**, or **transport mechanisms**, the rule is **split** into a sibling hunt.
+
+> **Mental model:**  
+> **The detection rule is the sensor.**  
+> **The incident/case is the narrative that stitches sensors into an attack story.**
+
+---
+
+## 1) The Four Rules of Detection Architecture
+
+###  Rule 1 — Split when the **Minimum Truth** changes
+If the non-negotiable baseline event (“truth”) requires a fundamental **schema change**, **telemetry change**, or **mechanism change**, **SPLIT**.
+
+**Examples of “Minimum Truth” shifts**
+- Host process execution → identity log transaction  
+- API call telemetry → artifact registry/file telemetry  
+- SMB/Service lateral movement → WMI/DCOM lateral movement  
+- DNS protocol telemetry → HTTP protocol telemetry  
+
+---
+
+###  Rule 2 — Split when the **noise domain** changes
+If the rule would require a completely different allowlist/baseline strategy (e.g., SCCM vs developer automation vs DC replication), **SPLIT**.
+
+---
+
+###  Rule 3 — Split when the **telemetry surface** changes
+Different primary tables/log sources = different sensors.
+
+**Examples**
+- `DeviceProcessEvents` ≠ `DeviceRegistryEvents` ≠ `SigninLogs` ≠ `DeviceNetworkEvents`
+
+---
+
+###  Rule 4 — Keep composite when you’re only refining **context**
+Classification, scoring, enrichment, and “reinforcement” belong **inside** the rule *when the Minimum Truth stays the same*.
+
+**Examples**
+- Same process surface: different LOLBins doing the same intent
+- Same network surface: different URIs/headers to the same destination category
+- Same persistence surface: create vs change using the same tool and schema
+
+---
+
+## 2) Common Attack Ecosystems: Split vs. Keep Matrix (Comprehensive)
+
+This matrix shows **real-world architectural decisions** across the **most common enterprise attack ecosystems**.
+
+### Decision Matrix: Split vs. Keep
+
+| Threat Ecosystem | Comparison Scenario | Decision | Architectural “Why” |
+|---|---|---:|---|
+| **Persistence: Scheduled Tasks** | `schtasks.exe /create` vs `Register-ScheduledTask` (PowerShell) | ✂️ SPLIT | Different truth surface: CLI process execution vs API/script abstraction. Different parsing + baselining. |
+| **Persistence: Scheduled Tasks** | `schtasks.exe /create` vs `schtasks.exe /change` | ✅ KEEP | Same truth domain: same binary + schema. Intent differs but telemetry aligns. |
+| **Persistence: Scheduled Tasks** | Task creation vs task execution telemetry | ✂️ SPLIT | “Creation” truth ≠ “Execution” truth. Separate
+****
+
 ## Rarity & Organisational Prevalence (Used Correctly)
 
 Rarity is **not** a detection trigger.  
