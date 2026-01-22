@@ -1,5 +1,5 @@
 NOTE: 
-My rules are logically production-safe, but final noise tuning requires tenant telemetry and admin workflow context. Without live systems, I validate correctness and attack-truth — operational calibration comes after deployment
+My rules are logically production-safe, but final noise tuning requires tenant telemetry and admin workflow context. Without live systems, I validate correctness and attack-truth — operational calibration comes after deployment. Some MINOR syntax issues may exist because these rules were tested in ADX-Docker.
 
 # Threat Hunting Philosophy & Detection Design
 
