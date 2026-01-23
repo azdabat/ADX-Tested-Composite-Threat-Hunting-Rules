@@ -1,0 +1,157 @@
+// ============================================================================
+// COMPOSITE HUNT (L2/L2.5) — OAuth Token / Session Misuse (Geo + ASN + UA)
+// Author: Ala Dabat
+//
+// IMPORTANT CORRECTION (Telemetry Truth):
+//   This analytic *anchors* on successful sign-in telemetry (interactive + non-interactive)
+//   because it is the most reliable, queryable "event anchor" in Entra sign-in logs.
+//   Token/session abuse *can* occur without a fresh interactive prompt in some scenarios;
+//   therefore, absence of a new interactive sign-in ≠ absence of token/session misuse.
+//   This rule is a detection constraint, not a claim about impossibility.
+//
+// BASELINE TRUTH (Minimum Required for THIS detection):
+//   - A successful sign-in event exists for (UserPrincipalName, AppId) within the recent window,
+//     and the entity has enough baseline history (MinBaselineEvents).
+//
+// REINFORCEMENT (Reduces Noise):
+//   - "New Country + New ASN" (Tier 1) = very low-noise indicator of stolen token/session.
+//   - "New ASN + New UA bucket + WeakAuth" (Tier 2) = expands coverage while limiting VPN/travel noise.
+//   - Baseline window excludes recent window (prevents baseline poisoning).
+//
+// Data:
+//   - SigninLogs (interactive)
+//   - AADNonInteractiveUserSignInLogs (non-interactive) [if present in Sentinel]
+//   - (Optional) ServicePrincipalSignInLogs [if you want app-only abuse coverage]
+//
+// MITRE:
+//   - T1550.001 (Use Alternate Authentication Material: Application Access Token / Session)
+//   - T1078 (Valid Accounts) (contextual)
+// ============================================================================
+
+let TokenBaselineWindow = 30d;
+let TokenRecentWindow   = 7d;
+let MinBaselineEvents   = 5;
+let ScoreThresholdTier2 = 7;
+
+// ---- Optional noise suppression hooks (enable if you know your environment)
+let EnableASNAllowlist = false;
+let KnownCorpOrProxyASNs = dynamic(["16509","15169"]); // EXAMPLE ONLY: fill with your VPN/egress/proxy ASNs
+let EnableCountryAllowlist = false;
+let HomeCountries = dynamic(["GB"]); // EXAMPLE ONLY
+let EnableUserAllowlist = false;
+let ExcludedUsers = dynamic(["svc-automation@contoso.com"]); // EXAMPLE ONLY
+
+// ---- Helper: normalize sign-in telemetry across interactive + non-interactive logs
+let SigninsAll = materialize(
+    union isfuzzy=true
+        (SigninLogs | extend SigninTable="SigninLogs"),
+        (AADNonInteractiveUserSignInLogs | extend SigninTable="AADNonInteractiveUserSignInLogs")
+        //,(ServicePrincipalSignInLogs | extend SigninTable="ServicePrincipalSignInLogs") // OPTIONAL: app-only abuse
+    | extend
+        ResultTypeStr = tostring(ResultType),
+        Country   = tostring(LocationDetails.countryOrRegion),
+        ASN       = tostring(NetworkLocationDetails.autonomousSystemNumber),
+        UA        = tostring(UserAgent),
+        IPAddress = tostring(IPAddress),
+        ClientAppUsed = tostring(ClientAppUsed),
+        AuthReq   = tostring(AuthenticationRequirement),
+        CAStatus  = tostring(ConditionalAccessStatus),
+        RiskState = tostring(RiskState),
+        RiskDetail= tostring(RiskDetail),
+        DeviceId  = tostring(DeviceDetail.deviceId),
+        OS        = tostring(DeviceDetail.operatingSystem),
+        Browser   = tostring(DeviceDetail.browser)
+    | where ResultTypeStr in ("0","") or isempty(ResultTypeStr)   // success
+    | where isnotempty(UserPrincipalName) and isnotempty(AppId)
+    | where isnotempty(Country) and isnotempty(ASN)
+    | where not(EnableUserAllowlist and UserPrincipalName in (ExcludedUsers))
+    | where not(EnableASNAllowlist and ASN in (KnownCorpOrProxyASNs))
+    | where not(EnableCountryAllowlist and Country in (HomeCountries))
+);
+
+// ---- UA bucketing: avoid "Mozilla/5.0" family-only; use ClientApp + Browser + OS where possible
+let WithUABucket = (T:(*) )
+{
+    T
+    | extend
+        BrowserNorm = iff(isempty(Browser), "UNKNOWN_BROWSER", toupper(Browser)),
+        OSNorm      = iff(isempty(OS),      "UNKNOWN_OS",      toupper(OS)),
+        ClientNorm  = iff(isempty(ClientAppUsed), "UNKNOWN_CLIENT", toupper(ClientAppUsed))
+    | extend
+        // UA_Bucket is stable across "Mozilla/5.0" noise and captures meaningful shifts
+        UA_Bucket = strcat(ClientNorm, "|", BrowserNorm, "|", OSNorm)
+};
+
+// ---- Baseline (exclude recent window to avoid poisoning)
+let Baseline =
+SigninsAll
+| invoke WithUABucket
+| where TimeGenerated between (ago(TokenBaselineWindow) .. ago(TokenRecentWindow))
+| summarize
+    BaselineCount      = count(),
+    BaselineCountries  = make_set(Country, 25),
+    BaselineASNs       = make_set(ASN, 50),
+    BaselineUABuckets  = make_set(UA_Bucket, 50),
+    BaselineIPs        = make_set(IPAddress, 50)
+  by UserPrincipalName, AppId, AppDisplayName
+| where BaselineCount >= MinBaselineEvents;
+
+// ---- Recent window
+SigninsAll
+| invoke WithUABucket
+| where TimeGenerated >= ago(TokenRecentWindow)
+| join kind=inner Baseline on UserPrincipalName, AppId
+| extend
+    IsNewCountry = iif(not(set_has_element(BaselineCountries, Country)), 1, 0),
+    IsNewASN     = iif(not(set_has_element(BaselineASNs, ASN)),         1, 0),
+    IsNewUA      = iif(not(set_has_element(BaselineUABuckets, UA_Bucket)), 1, 0),
+    // Weak auth: keep your intent, but make it tolerant of schema variance
+    WeakAuth     = iif(tolower(AuthReq) has "singlefactor", 1, 0)
+| extend Score =
+      (IsNewCountry * 3)
+    + (IsNewASN     * 3)
+    + (IsNewUA      * 2)
+    + (WeakAuth     * 2)
+// ---- Composite gates
+| where
+    // Tier 1: strong low-noise
+    (IsNewCountry == 1 and IsNewASN == 1)
+    // Tier 2: constrained expansion
+    or (IsNewASN == 1 and IsNewUA == 1 and WeakAuth == 1 and Score >= ScoreThresholdTier2)
+| extend Severity = case(
+      IsNewCountry == 1 and IsNewASN == 1 and Score >= 10, "HIGH",
+      "MEDIUM"
+  )
+| extend HunterDirective = strcat(
+    "ACTION: token/session misuse triage | ",
+    "CONTEXT: User=", UserPrincipalName,
+    " App=", AppDisplayName,
+    " Table=", SigninTable,
+    " Country=", Country,
+    " ASN=", ASN,
+    " UA_Bucket=", UA_Bucket,
+    " Auth=", AuthReq,
+    " CA=", CAStatus,
+    " Risk=", RiskState, "/", RiskDetail,
+    " Score=", tostring(Score), " | ",
+    "PIVOT: validate travel/VPN + device; if unconfirmed revoke sessions/refresh tokens; review Graph/mailbox/file activity; check CA/MFA signals."
+  )
+| project
+    TimeGenerated,
+    Severity,
+    Score,
+    UserPrincipalName,
+    AppId,
+    AppDisplayName,
+    Country,
+    ASN,
+    UA_Bucket,
+    AuthReq,
+    CAStatus,
+    RiskState,
+    RiskDetail,
+    ClientAppUsed,
+    IPAddress,
+    SigninTable,
+    HunterDirective
+| order by Score desc, TimeGenerated desc
