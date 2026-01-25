@@ -138,10 +138,11 @@ Enriched
     RiskLevel = case(RiskScore >= 120, "CRITICAL", RiskScore >= 90, "HIGH", RiskScore >= 70, "MEDIUM", "LOW")
 
 | where RiskLevel in ("MEDIUM","HIGH","CRITICAL")
-
+| extend DecodedPayload = base64_decode_string(tostring(extract(@"([A-Za-z0-9+/]{40,})", 1, RegistryValueData)))
 | project
     Timestamp,
     DeviceName,
+    DecodedPayload, // <----- Decodes Base64 New addition
     AccountName = coalesce(WriterUser, tostring(AccountName)),
     RegistryKey,
     RegistryValueName,
