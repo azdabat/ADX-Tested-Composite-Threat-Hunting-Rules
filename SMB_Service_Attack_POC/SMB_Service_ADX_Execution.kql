@@ -1,0 +1,168 @@
+// ============================================================================
+// STEP 1: DUAL ATTACK SIMULATION (The "Re-creation")
+// ============================================================================
+let MordorRaw = datatable(RawData: dynamic)
+[
+    // ------------------------------------------------------------------------
+    // SCENARIO 1: PsExec (CRITICAL) - The "Noisy" Attack
+    // Chain: Inbound 445 -> Drop PSEXESVC to ADMIN$ -> Start PSEXESVC Service
+    // ------------------------------------------------------------------------
+    dynamic({
+        "event_id": 3, "timestamp_offset": "0m", // Network Connects
+        "computer_name": "TARGET-FINANCE-01",
+        "destination_port": 445, "source_ip": "10.10.10.5", "user": "Attacker"
+    }),
+    dynamic({
+        "event_id": 11, "timestamp_offset": "1s", // File Drop (The Smoking Gun)
+        "computer_name": "TARGET-FINANCE-01",
+        "target_filename": "\\TARGET-FINANCE-01\\ADMIN$\\PSEXESVC.exe", // Explicit Admin Share
+        "image_path": "System"
+    }),
+    dynamic({
+        "event_id": 1, "timestamp_offset": "2s", // Service Execution
+        "computer_name": "TARGET-FINANCE-01",
+        "file_name": "PSEXESVC.exe",
+        "command_line": "PSEXESVC.exe",
+        "parent_name": "services.exe",
+        "user": "SYSTEM"
+    }),
+
+    // ------------------------------------------------------------------------
+    // SCENARIO 2: Impacket/SmbExec (HIGH) - The "Fileless" Attack
+    // Chain: Inbound 445 -> No File Drop -> Start cmd.exe Service
+    // ------------------------------------------------------------------------
+    dynamic({
+        "event_id": 3, "timestamp_offset": "5m", // Network Connects (5 mins later)
+        "computer_name": "TARGET-HR-04",
+        "destination_port": 445, "source_ip": "192.168.1.99", "user": "Attacker"
+    }),
+    // NO FILE DROP HERE (Simulating Fileless)
+    dynamic({
+        "event_id": 1, "timestamp_offset": "5m 2s", // Service Execution
+        "computer_name": "TARGET-HR-04",
+        "file_name": "cmd.exe", // Typical Impacket behavior
+        "command_line": "cmd.exe /c echo 'pwned' > \\\\127.0.0.1\\C$\\__output",
+        "parent_name": "services.exe",
+        "user": "SYSTEM"
+    })
+];
+
+// ============================================================================
+// STEP 2: THE HARNESS (Maps Mock Data to MDE Schema)
+// ============================================================================
+let DeviceProcessEvents = 
+    MordorRaw
+    | extend EventID = toint(RawData.event_id)
+    | where EventID == 1 
+    | extend 
+        Timestamp = now() + totimespan(tostring(RawData.timestamp_offset)),
+        DeviceId = tostring(RawData.computer_name),
+        DeviceName = tostring(RawData.computer_name),
+        FileName = tostring(RawData.file_name), 
+        ProcessCommandLine = tostring(RawData.command_line),
+        InitiatingProcessFileName = tostring(RawData.parent_name), 
+        AccountName = tostring(RawData.user)
+    | project Timestamp, DeviceId, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, AccountName;
+
+let DeviceNetworkEvents = 
+    MordorRaw
+    | extend EventID = toint(RawData.event_id)
+    | where EventID == 3 
+    | extend 
+        Timestamp = now() + totimespan(tostring(RawData.timestamp_offset)),
+        DeviceId = tostring(RawData.computer_name),
+        DeviceName = tostring(RawData.computer_name),
+        RemoteIP = tostring(RawData.source_ip), 
+        LocalPort = toint(RawData.destination_port),
+        ActionType = "InboundConnectionAccepted" 
+    | project Timestamp, DeviceId, DeviceName, RemoteIP, LocalPort, ActionType;
+
+let DeviceFileEvents = 
+    MordorRaw
+    | extend EventID = toint(RawData.event_id)
+    | where EventID == 11
+    | extend 
+        Timestamp = now() + totimespan(tostring(RawData.timestamp_offset)),
+        DeviceId = tostring(RawData.computer_name),
+        FileName = tostring(split(RawData.target_filename, "\\")[-1]),
+        FolderPath = tostring(RawData.target_filename)
+    | project Timestamp, DeviceId, FileName, FolderPath;
+
+// ============================================================================
+// STEP 3: YOUR PRODUCTION RULE (Composite Hunt)
+// ============================================================================
+
+let Lookback = 30d;
+let CorrWindow = 15m;
+let HighRiskShareMarkers = dynamic(["\\ADMIN$\\","\\C$\\","\\IPC$\\","\\admin$\\","\\c$\\","\\ipc$\\"]);
+let DropExt = dynamic([".exe",".dll",".sys",".bat",".ps1",".vbs",".js",".hta"]);
+let CommonServiceChildren = dynamic(["svchost.exe","dllhost.exe","taskhostw.exe","taskhost.exe","conhost.exe","msmpeng.exe"]);
+let AllowInitiators = dynamic(["ccmexec.exe","sccmagent.exe"]);
+
+// Signal A
+let InboundSMBRPC =
+    DeviceNetworkEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType == "InboundConnectionAccepted"
+    | where LocalPort in (445, 135)
+    | where isnotempty(RemoteIP)
+    | project DeviceId, SMBTime=Timestamp, SourceIP=RemoteIP, LocalPort;
+
+// Signal B
+let AdminShareWrites =
+    DeviceFileEvents
+    | where Timestamp >= ago(Lookback)
+    | where tostring(FolderPath) has_any (HighRiskShareMarkers)
+    | where isnotempty(FileName)
+    | extend LowerName = tolower(FileName)
+    | where LowerName has_any (DropExt)
+    | project DeviceId, WriteTime=Timestamp, DroppedFile=FileName, DroppedPath=FolderPath;
+
+// Signal C
+let ServiceSpawn =
+    DeviceProcessEvents
+    | where Timestamp >= ago(Lookback)
+    | where InitiatingProcessFileName =~ "services.exe"
+    | where not(tolower(FileName) in~ (CommonServiceChildren))
+    | where not(tolower(InitiatingProcessFileName) in~ (AllowInitiators))
+    | extend SvcCmd = tostring(ProcessCommandLine)
+    | project DeviceId, DeviceName, SvcTime=Timestamp, SvcProc=FileName, SvcCmd, AccountName;
+
+// Correlate
+ServiceSpawn
+| join kind=inner (InboundSMBRPC) on DeviceId
+| where SMBTime between ((SvcTime - CorrWindow) .. SvcTime)
+| join kind=leftouter (AdminShareWrites) on DeviceId
+| where isempty(WriteTime) or (WriteTime between ((SvcTime - CorrWindow) .. SvcTime))
+| summarize
+    Time = min(SvcTime),
+    TargetHost = any(DeviceName),
+    SourceIPs = make_set(SourceIP, 10),
+    Ports = make_set(LocalPort, 5),
+    ServiceProcesses = make_set(SvcProc, 10),
+    ServiceCmds = make_set(SvcCmd, 10),
+    DroppedFiles = make_set(DroppedFile, 10),
+    DroppedPaths = make_set(DroppedPath, 10),
+    Accounts = make_set(AccountName, 10)
+  by DeviceId
+| extend HasDrop = iif(array_length(DroppedFiles) > 0, 1, 0)
+| extend RiskScore =
+      0
+    + 60
+    + iif(HasDrop == 1, 25, 0)
+    + iif(array_length(SourceIPs) >= 2, 5, 0)
+| extend Severity = case(
+    RiskScore >= 85, "CRITICAL",
+    RiskScore >= 60, "HIGH",
+    "MEDIUM"
+)
+| extend Confidence = iif(HasDrop==1, "High (SMB/RPC + Service + Drop)", "Medium (SMB/RPC + Service)")
+| extend HunterDirective = strcat(
+    "ACTION: ", Severity, " suspected SMB/service lateral movement | ",
+    "CONTEXT: ", Confidence,
+    " | Sources=", tostring(SourceIPs),
+    " | ServiceProcs=", tostring(ServiceProcesses),
+    " | Dropped=", tostring(DroppedFiles)
+)
+| project Time, Severity, RiskScore, TargetHost, HunterDirective
+| order by RiskScore desc
