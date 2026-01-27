@@ -1,0 +1,295 @@
+// ============================================================================
+// COMPOSITE HUNT (L3): SMB_TaskExec_Svchost_Schedule_Empire_Cousin
+// Author: Ala Dabat
+//
+// TRUTH DOMAIN: Victim-side execution via Task Scheduler after inbound SMB/RPC.
+// MINIMUM TRUTH (Baseline):
+//   1) Inbound SMB/RPC to host (445/135) AND
+//   2) svchost.exe (Schedule service) spawns a suspicious child process
+//
+// WHY THIS EXISTS (Cousin Rule):
+//   Your PsExec/Services rule catches "services.exe spawn" (quiet, high fidelity).
+//   Empire/Atexec-style scheduled task execution is the cousin: "svchost.exe (Schedule) spawn" (noisy).
+//   This module stays conservative and requires convergence + reinforcement.
+//
+// MITRE:
+//   T1021.002 (SMB/Windows Admin Shares) / Remote Services adjacency
+//   T1053.005 (Scheduled Task)
+//   (Often overlaps with TA0002 Execution, TA0008 Lateral Movement)
+//
+// REINFORCEMENT (Convergence -> Confidence):
+//   - TaskCache artifacts (Tree/Tasks writes)
+//   - Task artifact drops (Tasks folder / XML drops)
+//   - Dangerous primitives (encoded/base64/web-download/hidden)
+//   - Network indicators (URL/IP/domain)
+//   - User-writable execution targets
+//   - Rare child binary prevalence (org prevalence)
+//
+// NOISE SUPPRESSION (Critical):
+//   - Require Schedule-service context (svchost command line contains "schedule")
+//   - Suppress common Windows maintenance/updaters
+//   - Drop “weak execution only + no reinforcement” cases
+//   - Keep all reinforcement optional (does not redefine baseline truth)
+// ============================================================================
+
+let Lookback       = 3d;
+let CorrWindow     = 20m;      // SMB/RPC -> execution window
+let ArtifactWindow = 60m;      // artifacts around execution
+
+// --------------------
+// Suspicious children spawned by Schedule service
+// --------------------
+let SuspTaskChildren = dynamic([
+  "cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe","mshta.exe",
+  "rundll32.exe","regsvr32.exe","bitsadmin.exe","certutil.exe","curl.exe","wget.exe"
+]);
+
+// High-noise children commonly launched by scheduled maintenance/updaters
+let BenignTaskChildren = dynamic([
+  "microsoftedgeupdate.exe","googleupdate.exe","software_reporter_tool.exe",
+  "sihclient.exe","usoclient.exe","tiworker.exe","trustedinstaller.exe",
+  "mpsigstub.exe","mpcmdrun.exe","msiexec.exe","wuauclt.exe","wuapihost.exe",
+  "devicecensus.exe","compattelrunner.exe","dism.exe","cleanmgr.exe"
+]);
+
+let ScheduleParent = "svchost.exe";
+
+// --------------------
+// Indicators / Patterns
+// --------------------
+let UserWritableRx  = @"(?i)^[a-z]:\\(users|public|programdata|temp|downloads|appdata)\\";
+let Base64ChunkedRx = @"(?:[A-Za-z0-9+/]{20,}={0,2})(?:\s+[A-Za-z0-9+/]{20,}={0,2})+";
+let UrlRx           = @"https?://[^\s'""<>]+";
+let IPv4Rx          = @"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b";
+let DomainRx        = @"\b([a-z0-9][a-z0-9-]{1,62}\.)+[a-z]{2,}\b";
+
+let DangerTokens = dynamic([
+  "-enc","-encodedcommand","frombase64string","iex(","invoke-expression",
+  "downloadstring","invoke-webrequest","invoke-restmethod","start-bitstransfer",
+  "http:","https:","-w hidden","-windowstyle hidden","/c"
+]);
+
+let TaskPathsRx = @"(?i)\\windows\\(system32\\tasks|tasks)\\";
+let XmlNameRx   = @"(?i)\.xml$";
+
+// --------------------
+// Org prevalence (reinforcement only)
+// --------------------
+let OrgPrevalence =
+  DeviceFileEvents
+  | where Timestamp >= ago(30d)
+  | where isnotempty(SHA256)
+  | summarize ChildDeviceCount = dcount(DeviceId) by SHA256;
+
+// --------------------
+// Signal A: inbound SMB/RPC to victim
+// --------------------
+let InboundSMBRPC =
+    DeviceNetworkEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType == "InboundConnectionAccepted"
+    | where LocalPort in (445, 135)
+    | where isnotempty(RemoteIP)
+    | project DeviceId, SMBTime=Timestamp, SourceIP=RemoteIP, LocalPort;
+
+// --------------------
+// Signal B: TaskCache registry truth (optional reinforcement)
+// --------------------
+let TaskCacheArtifacts_Slim =
+    DeviceRegistryEvents
+    | where Timestamp >= ago(Lookback)
+    | where ActionType == "RegistryValueSet"
+    | extend RK = tolower(tostring(RegistryKey)), RVD = tostring(RegistryValueData)
+    | where RK has @"software\microsoft\windows nt\currentversion\schedule\taskcache"
+    | extend
+        IsTree  = toint(RK has @"\taskcache\tree"),
+        IsTasks = toint(RK has @"\taskcache\tasks"),
+        RVDL = tolower(tostring(RVD)),
+        HasBlob = toint(strlen(RVD) > 500 or RVDL matches regex Base64ChunkedRx),
+        HasNet  = toint(RVDL matches regex UrlRx or RVDL matches regex IPv4Rx or RVDL matches regex DomainRx),
+        PointsWritable = toint(RVDL matches regex UserWritableRx)
+    | summarize
+        HasTaskCache = 1,
+        AnyTree = toint(max(IsTree) == 1),
+        AnyTasks = toint(max(IsTasks) == 1),
+        AnyRegBlob = toint(max(HasBlob) == 1),
+        AnyRegNet  = toint(max(HasNet) == 1),
+        AnyRegWritable = toint(max(PointsWritable) == 1),
+        TaskCacheKeys = make_set(RegistryKey, 5)
+      by DeviceId;
+
+// --------------------
+// Signal C: Task file/XML drops (optional reinforcement)
+// --------------------
+let TaskArtifactDrops_Slim =
+    DeviceFileEvents
+    | where Timestamp >= ago(Lookback)
+    | extend FPL = tolower(tostring(FolderPath)), FNL = tolower(tostring(FileName))
+    | where (FPL matches regex TaskPathsRx) or (FNL matches regex XmlNameRx)
+    | extend
+        IsTaskPath = toint(FPL matches regex TaskPathsRx),
+        IsXml      = toint(FNL matches regex XmlNameRx)
+    | summarize
+        HasDrop = 1,
+        AnyTaskPathDrop = toint(max(IsTaskPath) == 1),
+        AnyXmlDrop = toint(max(IsXml) == 1),
+        DropPaths = make_set(FolderPath, 8),
+        DropFiles = make_set(FileName, 8),
+        DropSHAs  = make_set(SHA256, 8)
+      by DeviceId;
+
+// --------------------
+// Baseline truth: svchost(Schedule) spawning suspicious child
+// --------------------
+let ScheduleExec =
+    DeviceProcessEvents
+    | where Timestamp >= ago(Lookback)
+    | where InitiatingProcessFileName =~ ScheduleParent
+    // Schedule-service guard (key noise reducer)
+    | where tolower(tostring(InitiatingProcessCommandLine)) has "schedule"
+    | where FileName in~ (SuspTaskChildren)
+    | where not(tolower(FileName) in~ (BenignTaskChildren))
+    | extend ChildCmdL = tolower(tostring(ProcessCommandLine))
+    | extend
+        ChildTime = Timestamp,
+        ChildProc = tostring(FileName),
+        ChildCmd  = tostring(ProcessCommandLine),
+        ParentCmd = tostring(InitiatingProcessCommandLine),
+        HasDanger = toint(ChildCmdL has_any (DangerTokens)),
+        HasBase64 = toint(ChildCmdL matches regex Base64ChunkedRx),
+        HasNet    = toint(ChildCmdL matches regex UrlRx or ChildCmdL matches regex IPv4Rx or ChildCmdL matches regex DomainRx),
+        PointsWritable = toint(ChildCmdL matches regex UserWritableRx)
+    | project DeviceId, DeviceName, ChildTime, AccountName, ChildProc, ChildCmd, ParentCmd,
+              HasDanger, HasBase64, HasNet, PointsWritable,
+              ChildSHA = SHA256;
+
+// --------------------
+// Correlation (SMB/RPC -> ScheduleExec) + Reinforcement + Scoring
+// --------------------
+ScheduleExec
+| join kind=inner (InboundSMBRPC) on DeviceId
+| where SMBTime between ((ChildTime - CorrWindow) .. ChildTime)
+
+| join kind=leftouter (TaskCacheArtifacts_Slim) on DeviceId
+| join kind=leftouter (TaskArtifactDrops_Slim) on DeviceId
+| join kind=leftouter (OrgPrevalence) on $left.ChildSHA == $right.SHA256
+
+| extend
+    HasTaskCache = coalesce(HasTaskCache, 0),
+    HasDrop      = coalesce(HasDrop, 0),
+    AnyRegBlob   = coalesce(AnyRegBlob, 0),
+    AnyRegNet    = coalesce(AnyRegNet, 0),
+    AnyRegWritable = coalesce(AnyRegWritable, 0),
+    AnyXmlDrop   = coalesce(AnyXmlDrop, 0),
+    ChildDeviceCount = coalesce(ChildDeviceCount, 0),
+    ChildIsRare  = toint(ChildDeviceCount <= 2)
+
+// Summarize per host
+| summarize
+    Time = min(ChildTime),
+    TargetHost = any(DeviceName),
+    Accounts = make_set(AccountName, 10),
+    SourceIPs = make_set(SourceIP, 15),
+    Ports = make_set(LocalPort, 5),
+    ExecChildren = make_set(ChildProc, 10),
+    ExecCmds = make_set(ChildCmd, 10),
+    ParentCmds = make_set(ParentCmd, 5),
+
+    HasTaskCache = max(HasTaskCache),
+    HasDrop = max(HasDrop),
+    AnyXmlDrop = max(AnyXmlDrop),
+
+    AnyDanger = toint(max(HasDanger) == 1),
+    AnyBase64 = toint(max(HasBase64) == 1),
+    AnyNet    = toint(max(HasNet) == 1),
+    AnyWritable = toint(max(PointsWritable) == 1),
+
+    AnyRegBlob = max(AnyRegBlob),
+    AnyRegNet  = max(AnyRegNet),
+    AnyRegWritable = max(AnyRegWritable),
+
+    AnyRareChild = toint(min(ChildDeviceCount) <= 2)
+  by DeviceId
+
+// Noise gate: weak exec + no reinforcement == likely maintenance noise
+| extend
+    WeakExecutionOnly = toint(AnyDanger==0 and AnyBase64==0 and AnyNet==0 and AnyWritable==0),
+    NoReinforcement   = toint(HasTaskCache==0 and HasDrop==0),
+    LikelyNoise       = toint(WeakExecutionOnly==1 and NoReinforcement==1)
+| where LikelyNoise == 0
+
+// Scoring (reinforcement increases confidence, never replaces baseline)
+| extend
+    BaseScore = 60,
+    Score_TaskCache = 20 * HasTaskCache,
+    Score_Drop      = 15 * HasDrop,
+    Score_XmlDrop   = 10 * AnyXmlDrop,
+
+    Score_Danger    = 20 * AnyDanger,
+    Score_Base64    = 15 * AnyBase64,
+    Score_Net       = 10 * AnyNet,
+    Score_Writable  = 10 * AnyWritable,
+
+    Score_RegBlob   = 10 * AnyRegBlob,
+    Score_RegNet    = 5  * AnyRegNet,
+    Score_RegWritable = 5 * AnyRegWritable,
+
+    Score_RareChild = 10 * AnyRareChild,
+    Score_MultiSource = 5 * toint(array_length(SourceIPs) >= 2)
+
+| extend RiskScore =
+    BaseScore + Score_TaskCache + Score_Drop + Score_XmlDrop +
+    Score_Danger + Score_Base64 + Score_Net + Score_Writable +
+    Score_RegBlob + Score_RegNet + Score_RegWritable +
+    Score_RareChild + Score_MultiSource
+
+| extend Severity = case(
+    RiskScore >= 115, "CRITICAL",
+    RiskScore >= 90,  "HIGH",
+    "MEDIUM"
+)
+
+| extend Confidence = case(
+    HasTaskCache==1 and HasDrop==1, "High (SMB/RPC + Schedule Exec + TaskCache + Drop)",
+    HasTaskCache==1, "Medium-High (SMB/RPC + Schedule Exec + TaskCache)",
+    HasDrop==1,      "Medium-High (SMB/RPC + Schedule Exec + Drop)",
+    "Medium (SMB/RPC + Schedule Exec)"
+)
+
+| extend HunterDirective = strcat(
+    "ACTION: ", Severity,
+    " | Suspected Scheduled Task lateral movement (Empire/Atexec-style cousin)",
+    " | Host=", TargetHost,
+    " | Sources=", tostring(SourceIPs),
+    " | Children=", tostring(ExecChildren),
+    " | Reinforce(TaskCache)=", tostring(HasTaskCache),
+    " Drop=", tostring(HasDrop),
+    " Xml=", tostring(AnyXmlDrop),
+    " RareChild=", tostring(AnyRareChild),
+    " | PIVOT: On target, inspect TaskCache Tree/Tasks + task name/GUID, pull Task Scheduler Operational logs if available,",
+    " validate spawned command line + parent svchost Schedule.",
+    " On source IPs, pivot for remote task tooling (schtasks/atexec/impacket/Empire) and nearby admin-share writes."
+)
+
+| project
+    Time,
+    Severity,
+    RiskScore,
+    Confidence,
+    TargetHost,
+    SourceIPs,
+    Ports,
+    Accounts,
+    ExecChildren,
+    ExecCmds,
+    ParentCmds,
+    HasTaskCache,
+    HasDrop,
+    AnyXmlDrop,
+    AnyDanger,
+    AnyBase64,
+    AnyNet,
+    AnyWritable,
+    AnyRareChild,
+    HunterDirective
+| order by RiskScore desc, Time desc
