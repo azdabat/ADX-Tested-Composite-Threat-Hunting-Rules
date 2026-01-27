@@ -3,7 +3,7 @@
 // Author: Ala Dabat
 // Status: Production-minded (requires tenant tuning for allowlists; built for high noise domains)
 // Data: DeviceProcessEvents, DeviceNetworkEvents, DeviceFileEvents, DeviceRegistryEvents (MDE / Sentinel)
-//
+// WORK IN PROGRESS: RULE COMPLEXITY NEEDS FURTHER REFINMENT AND ADX TESTING
 // ----------------------------------------------------------------------------
 // WHAT THIS RULE IS (The “Cousin” to your services.exe SMB rule)
 // ----------------------------------------------------------------------------
