@@ -1,0 +1,258 @@
+// ============================================================================
+// COMPOSITE HUNT (L3) — SMB + Service Execution (PsExec / Impacket / SCM Remote Exec)
+// Module: Lateral Movement Ecosystem — "Service Execution" (HIGH fidelity module)
+// Author: Ala Dabat
+// Version: v1.0 (Production Grade)
+//
+// TRUTH DOMAIN (Sensors)
+//   - DeviceProcessEvents   (execution truth: services.exe spawning an uncommon child)
+//   - DeviceNetworkEvents   (reinforcement: inbound SMB/RPC to victim)
+//   - DeviceFileEvents      (optional reinforcement: admin share / staging drops)
+//   - (Optional) Org Prevalence via DeviceFileEvents SHA256 distribution (reinforcement)
+//
+// MINIMUM TRUTH (Baseline Truth)
+//   A) Victim host receives inbound SMB/RPC (445/135) AND
+//   B) services.exe spawns an uncommon child process within CorrWindow
+//
+// WHY THIS EXISTS
+//   Remote Service Creation / SCM execution (PsExec / Impacket psexec/smbexec/atexec variants) typically:
+//     1) Establishes inbound SMB/RPC to the victim
+//     2) Causes service creation/execution that results in services.exe starting a payload
+//   This module is victim-perspective and stays resilient even when the "source tool" changes.
+//
+// ATTACK VECTORS COVERED (examples)
+//   - Sysinternals PsExec (service-based remote execution)
+//   - Impacket: psexec.py / smbexec.py / wmiexec.py (service/SMB components vary)
+//   - Remote service start via sc.exe (from remote host) -> victim services.exe executes
+//
+// BLIND SPOTS (explicit)
+//   - Pure WMI / DCOM execution without service execution truth (use cousin: WMI/DCOM module)
+//   - WinRM-only execution (use cousin: WinRM module)
+//   - Scheduled task execution via Schedule service (use cousin: svchost Schedule module)
+//   - If your telemetry lacks InboundConnectionAccepted, fall back to other net signals (tenant-specific)
+//
+// MITRE
+//   - TA0008 Lateral Movement
+//     - T1021.002 SMB/Windows Admin Shares
+//   - TA0003 Persistence / Execution (operationally part of lateral execution)
+//     - T1543.003 Windows Service
+//
+// DESIGN (Composite Framework)
+//   1) Reductive Baseline Truth (quiet anchor): services.exe spawning uncommon child
+//   2) Convergence: inbound SMB/RPC close in time -> turns baseline into lateral-move narrative
+//   3) Reinforcement (confidence/priority, not dependency):
+//        - Admin share drop (.exe/.dll/.sys/.ps1/...) on victim
+//        - Dangerous child command-line primitives
+//        - Rare child SHA256 across org (org prevalence)
+//   4) Noise suppression:
+//        - Suppress common service children
+//        - Suppress common IT management initiators (tenant-tunable)
+//        - Optional "weak execution" deboosted if no reinforcement
+//
+// TUNING NOTES
+//   - CommonServiceChildren and AllowInitiators are tenant-specific. Start conservative.
+//   - If you see noise from Patch/EDR update chains, add to allowlists OR require HasDrop for HIGH severity.
+//   - Org prevalence is a prioritization multiplier: rare == more suspicious; common != automatically benign.
+//
+// OUTPUT INTENT
+//   - One row per victim host per correlated window
+//   - SOC-ready fields + HunterDirective included
+// ============================================================================
+
+let Lookback     = 3d;
+let CorrWindow   = 15m;   // SMB/RPC -> service exec convergence window
+let DropWindow   = 20m;   // optional staging drop window around execution
+let PrevLookback = 30d;   // org prevalence lookback
+
+// -------------------------
+// Tenant tunables (start conservative)
+// -------------------------
+let HighRiskShareMarkers = dynamic(["\\ADMIN$\\","\\C$\\","\\IPC$\\","\\admin$\\","\\c$\\","\\ipc$\\"]);
+let DropExt = dynamic([".exe",".dll",".sys",".bat",".cmd",".ps1",".vbs",".js",".jse",".hta",".ocx",".cpl",".scr"]);
+
+// Common service-hosted children (baseline noise suppression)
+let CommonServiceChildren = dynamic([
+  "svchost.exe","dllhost.exe","taskhostw.exe","taskhost.exe","conhost.exe","csrss.exe",
+  "wermgr.exe","werfault.exe","runtimebroker.exe","sihost.exe",
+  "msmpeng.exe","mssense.exe","senseir.exe","tiworker.exe","trustedinstaller.exe",
+  "searchindexer.exe","sgrmbroker.exe"
+]);
+
+// Common IT management / software deployment initiators (writer context on victim; tune per tenant)
+let AllowInitiators = dynamic([
+  "ccmexec.exe","intunemanagementextension.exe","taniumclient.exe","qualysagent.exe",
+  "kaseyaagent.exe","ninjarmm.exe","ateraagent.exe","pdqdeployrunner.exe","ansible.exe",
+  "salt-minion.exe","nxlog.exe"
+]);
+
+// Child process "danger primitives" (reinforcement)
+let DangerTokens = dynamic([
+  "powershell","pwsh","-enc","-encodedcommand","frombase64string","iex(","invoke-expression",
+  "downloadstring","invoke-webrequest","invoke-restmethod","start-bitstransfer",
+  "cmd.exe /c","rundll32","regsvr32","mshta","wscript","cscript",
+  "certutil","bitsadmin","curl","wget",
+  "http:","https:"
+]);
+
+let Base64ChunkedRx = @"(?:[A-Za-z0-9+/]{20,}={0,2})(?:\s+[A-Za-z0-9+/]{20,}={0,2})+";
+
+// -------------------------
+// Reinforcement: Org prevalence (SHA256 distribution across devices)
+// Uses DeviceFileEvents as an approximate availability source in MDE/Sentinel.
+// If your environment prefers DeviceProcessEvents SHA256, swap it in.
+// -------------------------
+let OrgPrevalence =
+  DeviceFileEvents
+  | where Timestamp >= ago(PrevLookback)
+  | where isnotempty(SHA256)
+  | summarize ChildDeviceCount = dcount(DeviceId) by SHA256;
+
+// -------------------------
+// Signal A: inbound SMB/RPC on victim (convergence with service execution)
+// -------------------------
+let InboundSMBRPC =
+  DeviceNetworkEvents
+  | where Timestamp >= ago(Lookback)
+  | where ActionType == "InboundConnectionAccepted"
+  | where LocalPort in (445, 135)
+  | where isnotempty(RemoteIP)
+  | project DeviceId, SMBTime=Timestamp, SourceIP=RemoteIP, LocalPort;
+
+// -------------------------
+// Signal B: suspicious admin-share write on victim (optional reinforcement)
+// Note: schema varies; FolderPath often contains UNC/admin share markers in many datasets.
+// -------------------------
+let AdminShareWrites =
+  DeviceFileEvents
+  | where Timestamp >= ago(Lookback)
+  | where isnotempty(FolderPath) and isnotempty(FileName)
+  | where tostring(FolderPath) has_any (HighRiskShareMarkers)
+  | extend LowerName = tolower(FileName)
+  | where LowerName has "." and (LowerName endswith_any (DropExt))
+  | project DeviceId, WriteTime=Timestamp, DroppedFile=FileName, DroppedPath=FolderPath, DroppedSHA=SHA256;
+
+// -------------------------
+// Baseline Truth: services.exe spawning an uncommon child on victim
+// -------------------------
+let ServiceSpawn =
+  DeviceProcessEvents
+  | where Timestamp >= ago(Lookback)
+  | where InitiatingProcessFileName =~ "services.exe"
+  | extend ChildProcL = tolower(tostring(FileName))
+  | where not(ChildProcL in~ (CommonServiceChildren))
+  | extend InitiatorL = tolower(tostring(InitiatingProcessParentFileName))
+  | where not(InitiatorL in~ (AllowInitiators))
+  | extend ChildCmd = tostring(ProcessCommandLine)
+  | extend ChildCmdL = tolower(ChildCmd)
+  | extend
+      HasDanger = toint(ChildCmdL has_any (DangerTokens)),
+      HasBase64 = toint(ChildCmdL matches regex Base64ChunkedRx),
+      HasSuspExt = toint(ChildCmdL matches regex @"(?i)\.(exe|dll|sys|ps1|vbs|js|jse|bat|cmd|hta|scr)\b")
+  | project
+      DeviceId, DeviceName,
+      SvcTime=Timestamp,
+      ChildProc=tostring(FileName),
+      ChildCmd,
+      AccountName,
+      ChildSHA=tostring(SHA256),
+      HasDanger, HasBase64, HasSuspExt;
+
+// -------------------------
+// Correlation: Service exec + inbound SMB/RPC + optional staging drop + prevalence
+// -------------------------
+ServiceSpawn
+| join kind=inner (InboundSMBRPC) on DeviceId
+| where SMBTime between ((SvcTime - CorrWindow) .. SvcTime)
+| join kind=leftouter (AdminShareWrites) on DeviceId
+| where isempty(WriteTime) or (WriteTime between ((SvcTime - DropWindow) .. (SvcTime + 2m)))
+| join kind=leftouter (OrgPrevalence) on $left.ChildSHA == $right.SHA256
+| extend ChildDeviceCount = coalesce(ChildDeviceCount, 0)
+| extend ChildIsRare = toint(ChildDeviceCount <= 2)
+
+// Summarize per victim host for the correlated window
+| summarize
+    Time = min(SvcTime),
+    TargetHost = any(DeviceName),
+    Accounts = make_set(AccountName, 10),
+    SourceIPs = make_set(SourceIP, 15),
+    Ports = make_set(LocalPort, 5),
+    ServiceProcesses = make_set(ChildProc, 10),
+    ServiceCmds = make_set(ChildCmd, 10),
+    DroppedFiles = make_set(DroppedFile, 10),
+    DroppedPaths = make_set(DroppedPath, 10),
+    AnyDanger = toint(max(HasDanger) == 1),
+    AnyBase64 = toint(max(HasBase64) == 1),
+    AnySuspExt = toint(max(HasSuspExt) == 1),
+    HasDrop = toint(countif(isnotempty(WriteTime)) > 0),
+    MinChildDeviceCount = min(ChildDeviceCount),
+    AnyRareChild = toint(min(ChildDeviceCount) <= 2)
+  by DeviceId
+
+// -------------------------
+// Noise suppression: "weak execution only" with no reinforcement is likely noise
+// (Keeps the high-fidelity posture while still allowing fileless variants)
+// -------------------------
+| extend WeakExecutionOnly = toint(AnyDanger==0 and AnyBase64==0 and AnySuspExt==0)
+| extend NoReinforcement   = toint(HasDrop==0)
+| extend LikelyNoise = toint(WeakExecutionOnly==1 and NoReinforcement==1 and AnyRareChild==0)
+| where LikelyNoise == 0
+
+// -------------------------
+// Scoring: Truth is heavy, reinforcement adds confidence
+// -------------------------
+| extend
+    BaseScore = 60,                         // baseline truth: SMB/RPC + service exec convergence
+    Score_Drop = 25 * HasDrop,              // strong reinforcement: staging evidence
+    Score_Danger = 20 * AnyDanger,          // execution intent reinforcement
+    Score_Base64 = 15 * AnyBase64,          // obfuscation reinforcement
+    Score_SuspExt = 10 * AnySuspExt,        // payload reference reinforcement
+    Score_RareChild = 10 * AnyRareChild,    // prioritization multiplier
+    Score_MultiSource = 5 * toint(array_length(SourceIPs) >= 2)
+| extend RiskScore = BaseScore + Score_Drop + Score_Danger + Score_Base64 + Score_SuspExt + Score_RareChild + Score_MultiSource
+| extend Severity = case(
+    RiskScore >= 95, "CRITICAL",
+    RiskScore >= 75, "HIGH",
+    "MEDIUM"
+)
+| extend Confidence = case(
+    HasDrop==1 and AnyDanger==1, "High (SMB/RPC + Service Exec + Drop + Intent)",
+    HasDrop==1, "Medium-High (SMB/RPC + Service Exec + Drop)",
+    AnyDanger==1 or AnyBase64==1, "Medium-High (SMB/RPC + Service Exec + Intent/Obfuscation)",
+    "Medium (SMB/RPC + Service Exec)"
+)
+
+// -------------------------
+// Analyst guidance (HunterDirective)
+// -------------------------
+| extend HunterDirective = strcat(
+    "ACTION: ", Severity, " suspected SMB/SCM lateral movement via service execution | ",
+    "Host=", TargetHost,
+    " | Sources=", tostring(SourceIPs),
+    " | Ports=", tostring(Ports),
+    " | ServiceChildren=", tostring(ServiceProcesses),
+    " | Confidence=", Confidence,
+    " | PIVOT: On target, review service install artifacts (Windows 7045 if available), ",
+    "inspect services.exe spawn context & child binary signer/path, ",
+    "check admin-share drop paths ", tostring(DroppedPaths),
+    "; on source IPs, pivot for remote exec tooling (PsExec/Impacket), credential access, and follow-on C2."
+)
+
+// -------------------------
+// Output
+// -------------------------
+| project
+    Time,
+    Severity,
+    RiskScore,
+    Confidence,
+    TargetHost,
+    Accounts,
+    SourceIPs,
+    Ports,
+    ServiceProcesses,
+    ServiceCmds,
+    DroppedFiles,
+    DroppedPaths,
+    MinChildDeviceCount,
+    HunterDirective
+| order by RiskScore desc, Time desc
