@@ -1029,3 +1029,196 @@ Otherwise:
 - reinforce confidence
 - correlate at the incident layer
 - This prevents ghost chains and keeps hunts operational.
+
+- # ✅ Composite Rule Template v1.0 (Minimum Truth → Reinforcement → Convergence)
+
+This is the fixed structure I use for all production-grade behavioural detections.
+
+It prevents “runaway hunts”, keeps rules explainable, and ensures every detection is anchored in a single observable truth.
+
+---
+
+## 1. Minimum Truth (Baseline Anchor)
+
+Every composite hunt begins with **one non-negotiable behavioural truth**:
+
+> The one event that *must* exist if the technique is happening.
+
+Examples:
+
+| Ecosystem | Minimum Truth Anchor |
+|----------|----------------------|
+| Scheduled Task Abuse | `svchost.exe (Schedule)` spawning abnormal child |
+| Service Lateral Movement | `services.exe` spawning uncommon binary |
+| Registry Persistence | `RegistryValueSet` in autorun/hijack keys |
+| OAuth Consent Abuse | High-risk scope grant event |
+| Named Pipe C2 | Rare pipe creation matching implant family |
+
+**Minimum Truth is necessary — but never sufficient.**
+
+By itself, it is often noisy.
+
+---
+
+## 2. Why Truth Alone Is Noisy
+
+A baseline anchor is usually observable in benign operations:
+
+- Windows maintenance tasks  
+- Installer behaviour  
+- Admin activity  
+- Software updates  
+- Background services  
+
+So we never alert on truth alone.
+
+Truth is only the starting point.
+
+---
+
+## 3. Reinforcement (Confidence Builders)
+
+Reinforcement answers:
+
+> “What makes this baseline *depart from normal*?”
+
+These are **secondary signals**, not new anchors.
+
+Examples:
+
+- Dangerous command-line primitives (`-enc`, `iex`, `rundll32`)
+- User-writable execution targets (`AppData`, `Temp`)
+- TaskCache registry artefacts
+- Inbound SMB before execution
+- Rare writer process (Org Prevalence)
+- Suspicious parent process (Office → LOLBin)
+
+Reinforcement increases score — it does not redefine truth.
+
+---
+
+## 4. Convergence (Where Noise Becomes Threat)
+
+A detection becomes high-confidence when:
+
+> Multiple reinforcements intersect within a time window.
+
+This is **Convergence**:
+
+Minimum Truth
+Reinforcement A
+Reinforcement B
+Context Window = Behavioural Threat
+Example:
+
+- `svchost.exe (Schedule)` spawns PowerShell  
+- AND inbound SMB happened within 20 minutes  
+- AND TaskCache artefacts exist  
+→ Empire-style lateral movement
+
+That intersection is where malicious behaviour begins.
+
+---
+
+## 5. Noise Suppression (Do Not Dilute Fidelity)
+
+Noise suppression is not optional.
+
+Every rule must suppress:
+
+- Safe vendor binaries
+- Known update processes
+- Common task/service children
+- Background OS churn
+
+Rules should remain:
+
+- quiet
+- high-fidelity
+- behaviour-first
+
+If suppression breaks the hunt, the baseline is wrong.
+
+---
+
+## 6. Org Prevalence (Rarity Reinforcement)
+
+Org prevalence is a prioritisation multiplier:
+
+> “How common is this binary or behaviour across the estate?”
+
+Example:
+
+- Writer SHA seen on 1 host → targeted attack likelihood ↑  
+- Writer SHA seen on 300 hosts → admin tool likelihood ↑  
+
+Prevalence is never truth.
+
+It is reinforcement.
+
+---
+
+## 7. Scoring Model (Cumulative, Not Binary)
+
+All composites output a severity score:
+
+- Baseline truth = fixed base score
+- Reinforcements add weight
+- Rare behaviours add weight
+- Safe baselines subtract weight
+
+Example:
+
+BaseScore (Truth)         = 60
+TaskCache Artefact        = +20
+Dangerous Primitive       = +20
+File Drop Reinforcement   = +15
+Rare Writer               = +10
+FinalScore                = 125 (CRITICAL)
+
+
+This prevents brittle yes/no alerting.
+
+---
+
+## 8. Hunter Directives (Operational Output)
+
+Every rule ends with:
+
+- What this means
+- What to pivot into next
+- How to scope blast radius
+- When to escalate immediately
+
+Rules are not just detections.
+
+They are SOC-ready playbooks.
+
+---
+
+# ✅ The Rule Factory Checklist
+
+Before publishing any hunt, I confirm:
+
+| Requirement | Present? |
+|------------|----------|
+| Minimum Truth is 1 clear anchor | ✅ |
+| Reinforcement is limited (2–4 max) | ✅ |
+| Convergence window exists | ✅ |
+| Noise suppression is explicit | ✅ |
+| Org prevalence is optional scoring only | ✅ |
+| Severity is cumulative | ✅ |
+| Output is SOC actionable | ✅ |
+
+---
+
+# The Golden Rule
+
+> If I cannot explain the hunt in 60 seconds, it is too complex.
+
+Composite engineering is clarity, not bloat.
+
+---
+
+This template is the backbone of my Tier-1 Enterprise Attack Ecosystem coverage.
+
