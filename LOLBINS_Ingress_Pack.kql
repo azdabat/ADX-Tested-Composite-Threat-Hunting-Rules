@@ -2,7 +2,7 @@
 // COMPOSITE HUNT (L2 / Core+): Ingress Tool Transfer — Native LOLBins (High-Fidelity)
 // STATUS: PRODUCTION HARDENED (Tenant tuning required)
 // AUTHOR: Ala Dabat
-//
+// TEST PACK: NOT COMPOSITED.
 // WHY (Framework):
 //   Minimum Truth  : Native transfer utility executed with external transfer intent (URL/external IP/transfer flags)
 //   Reinforcement  : Suspicious parent OR writable-path targeting
