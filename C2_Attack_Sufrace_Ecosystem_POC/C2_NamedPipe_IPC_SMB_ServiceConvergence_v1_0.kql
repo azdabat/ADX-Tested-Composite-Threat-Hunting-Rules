@@ -1,0 +1,257 @@
+// ============================================================================
+// COMPOSITE HUNT (L3): C2_NamedPipe_IPC_SMB_ServiceConvergence_v1_0
+// Author: Ala Dabat
+//
+// TRUTH DOMAIN (Minimum Truth Sensors)
+//   - DeviceEvents: Named pipe creation/connection (IPC truth)
+//   - (Reinforcement) DeviceNetworkEvents: SMB sessions / named pipe over SMB when present
+//   - (Reinforcement) DeviceEvents: ServiceInstalled (service staging / remote-exec tooling)
+//
+// WHY THIS EXISTS (Attacker Tradecraft)
+//   Many frameworks (e.g., Cobalt Strike) can communicate peer-to-peer over Windows named pipes,
+//   often encapsulated in SMB. This creates a high-signal "IPC channel" that can overlap with
+//   lateral movement and post-ex tooling. :contentReference[oaicite:4]{index=4}
+//
+// MITRE (Primary Alignment)
+//   - TA0011 Command and Control
+//   - T1071.002 (C2 channel variants incl. SMB-encapsulated communications; includes Cobalt Strike note)
+//   - (Operational overlap) TA0008 Lateral Movement (SMB context), TA0003 Persistence (service installs)
+//
+// FRAMEWORK (Your Method)
+//   MINIMUM TRUTH
+//     A named pipe is created/connected that is NOT part of known baseline fragments.
+//   CONVERGENCE (where truth departs from noise)
+//     Any of the following high-signal intersections:
+//       - Fork-n-Run style dynamic hex pipe shape
+//       - Mojo pipe masquerade (browser-ish pipe but wrong process lineage)
+//       - epmapper typosquat / RPC deception pattern
+//       - Pipe family matches known high-risk/remote-exec fragments AND near SMB/service context
+//   REINFORCEMENT (confidence ↑, not always required)
+//     - Near SMB activity (445/139) with a named pipe field (when available in AdditionalFields)
+//     - Near ServiceInstalled on same host (remote exec/service staging overlap)
+//     - Rarity: OrgPipeCount low + HostCount low (targeted behaviour) or high spread penalty (likely benign)
+//   NOISE SUPPRESSION
+//     - Baseline pipe fragments suppressed (browser/DB/platform background)
+//     - Baseline service accounts get a small penalty (SYSTEM isn’t “benign”, it’s just common)
+//     - Medium/Legacy pipe families require context (SMB near or suspicious parent) to trigger
+//
+// OUTPUT
+//   SOC-ready fields + HuntingDirectives array (your style).
+// ============================================================================
+
+let lookback = 7d;
+let slowServiceLookback = 21d;
+
+let nearSmbWindow = 10m;
+let nearServiceWindow = 20m;
+
+// ---- Tenant tunables (keep tight; expand only with evidence)
+let BaselineAccounts = dynamic(["NT AUTHORITY\\SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE"]);
+
+let BaselinePipeFragments = dynamic([
+  "eventlog","winsock","sql","postgres","mysql","oracle",
+  "vmware","vbox","hyperv","docker",
+  "chrome","msedge","brave","firefox","teams","onedrive","crashpad"
+]);
+
+let SuspiciousParents = dynamic([
+  "winword.exe","excel.exe","powerpnt.exe","outlook.exe",
+  "wscript.exe","cscript.exe","mshta.exe",
+  "powershell.exe","pwsh.exe","cmd.exe",
+  "rundll32.exe","regsvr32.exe","wmic.exe"
+]);
+
+// ---- Pipe indicator families (keep lists tight; these are "families", not IoC-only)
+let HighRiskPipes = dynamic([
+  // Cobalt Strike / profiles (examples of families; tune per dataset reality)
+  "msse-","status_","msagent_","postex_","beacon","pipetst",
+  "cobaltstrike","csession","cspipe",
+  // Sliver / Mythic / Havoc / BR / Covenant / Empire families
+  "sliver","mythic","demon_pipe","bruteratel","covenant","empire","poshc2",
+  // Credential tooling families
+  "lsadump","cachedump","wceservicepipe","samdump","credpipe",
+  // Mojo baseline marker
+  "mojo."
+]);
+
+let MediumRiskPipes = dynamic([
+  // Remote exec/service tooling families
+  "psexesvc","paexec","remcom","csexec",
+  "wmiexec","dcomexec","smbexec","atexec",
+  "svcctl","servicecontrol"
+]);
+
+let LegacyRpcPipes = dynamic([
+  "atsvc","spoolss","winreg","lsarpc",
+  "netlogon","samr","wkssvc","ntsvcs","epmapper"
+]);
+
+// ---- 1) Named pipe telemetry (Created/Connected)
+// MDE variants differ; we defensively coalesce fields from AdditionalFields.
+let PipeEventsRaw =
+DeviceEvents
+| where Timestamp >= ago(lookback)
+| where ActionType in ("NamedPipeEvent","NamedPipeCreated","NamedPipeConnected")
+| extend F = parse_json(AdditionalFields)
+| extend PipeName = coalesce(tostring(F.PipeName), tostring(F.NamedPipe), tostring(F.Pipe))
+| where isnotempty(PipeName)
+| extend PipeLower = tolower(PipeName)
+| where PipeLower !has_any (BaselinePipeFragments)
+| extend
+    DeviceNameL = tolower(DeviceName),
+    AccountName = tostring(AccountName),
+    Proc   = tostring(InitiatingProcessFileName),
+    Parent = tostring(InitiatingProcessParentFileName),
+    Cmd    = tostring(InitiatingProcessCommandLine),
+    SuspParent = tolower(Parent) has_any (SuspiciousParents)
+| project
+    Timestamp, DeviceId, DeviceNameL, AccountName,
+    Proc, Parent, Cmd,
+    PipeName, PipeLower,
+    SuspParent;
+
+// ---- 2) Shape / deception signals (high signal)
+// Fork-n-Run: hex pipes (optional \\.\ prefix); Mojo masquerade; epmapper typosquat.
+let PipeSignals =
+PipeEventsRaw
+| extend
+    ForkNRunHex = PipeName matches regex @"^(\\\\.\\)?\\pipe\\[0-9a-f]{7,10}$",
+    IsMojo = PipeLower has "mojo.",
+    MojoLegitShape = PipeName matches regex @"^(\\\\.\\)?\\pipe\\mojo\.[0-9]{2,8}\.[0-9]{2,8}\.",
+    MojoDeviation = IsMojo and ((MojoLegitShape == false) or (tolower(Proc) !in~ ("chrome.exe","msedge.exe","brave.exe","firefox.exe"))),
+    EpmTyposquat = (PipeLower has "epmap") and (PipeLower !has "epmapper")
+| project-away IsMojo, MojoLegitShape;
+
+// ---- 3) SMB correlation (reinforcement; not always present)
+// Some tenants expose NamedPipe in AdditionalFields; if not present, rule still works without it.
+let SmbPipeConnections =
+DeviceNetworkEvents
+| where Timestamp >= ago(lookback)
+| where ActionType has "Success"
+| where RemotePort in (445,139)
+| extend F = parse_json(AdditionalFields)
+| extend NamedPipe = tostring(F.NamedPipe)
+| project
+    SmbTime = Timestamp,
+    DeviceNameL = tolower(DeviceName),
+    RemoteIP,
+    RemotePort,
+    SmbPipeLower = tolower(NamedPipe);
+
+// ---- 4) Service creation (MDE-friendly reinforcement)
+let ServiceCreation =
+DeviceEvents
+| where Timestamp >= ago(slowServiceLookback)
+| where ActionType == "ServiceInstalled"
+| extend F = parse_json(AdditionalFields)
+| project
+    SvcTime = Timestamp,
+    DeviceNameL = tolower(DeviceName),
+    ServiceName = tostring(F.ServiceName),
+    ServiceFileName = tostring(F.ServiceFileName),
+    ServiceAccount = tostring(F.ServiceAccount);
+
+// ---- 5) Rarity scoring
+let PipeFrequency =
+PipeSignals
+| summarize OrgPipeCount = count(), HostCount = dcount(DeviceNameL) by PipeName;
+
+// ---- 6) Correlate + classify + score
+PipeSignals
+| join kind=leftouter PipeFrequency on PipeName
+| join kind=leftouter (SmbPipeConnections) on DeviceNameL
+| join kind=leftouter (ServiceCreation) on DeviceNameL
+| extend
+    PipeCategory = case(
+        PipeLower has_any (HighRiskPipes), "HighRisk",
+        PipeLower has_any (MediumRiskPipes), "MediumRisk",
+        PipeLower has_any (LegacyRpcPipes), "LegacyRPC",
+        "Suspicious"
+    ),
+    SmbNear = isnotempty(RemoteIP) and abs(datetime_diff("minute", Timestamp, SmbTime)) <= toint(nearSmbWindow/1m),
+    PipeNameMatchesSmb = isnotempty(SmbPipeLower) and (PipeLower == SmbPipeLower),
+    ServiceNear = isnotempty(ServiceName) and abs(datetime_diff("minute", Timestamp, SvcTime)) <= toint(nearServiceWindow/1m)
+| extend
+    // ---- BaseScore = minimum truth quality
+    BaseScore = case(
+        ForkNRunHex, 85,
+        MojoDeviation, 75,
+        EpmTyposquat, 70,
+        PipeCategory == "HighRisk", 75,
+        PipeCategory == "MediumRisk", 55,
+        PipeCategory == "LegacyRPC", 35,
+        25
+    ),
+    // ---- Reinforcement: rarity (targeted signals)
+    RarityScore = case(
+        OrgPipeCount <= 1, 25,
+        OrgPipeCount <= 3, 15,
+        0
+    ),
+    // ---- SpreadPenalty: widespread pipe across many hosts is often benign/platform
+    SpreadPenalty = case(
+        HostCount >= 10, -20,
+        HostCount >= 5, -10,
+        0
+    ),
+    // ---- ContextScore: convergence boosters
+    ContextScore =
+        (15 * iff(SuspParent, 1, 0)) +
+        (20 * iff(SmbNear and PipeNameMatchesSmb, 1, 0)) +
+        (10 * iff(ServiceNear, 1, 0)),
+    // ---- Baseline penalty (soft)
+    BaselinePenalty = iff(AccountName in (BaselineAccounts), -10, 0)
+| extend FinalScore = BaseScore + RarityScore + SpreadPenalty + ContextScore + BaselinePenalty
+| extend Severity = case(
+    FinalScore >= 90, "CRITICAL",
+    FinalScore >= 70, "HIGH",
+    FinalScore >= 50, "MEDIUM",
+    "LOW"
+)
+
+// ---- 7) Noise gate (behavioural truth)
+// High-signal shapes always pass.
+// Medium/Legacy families require context to avoid background RPC/admin noise.
+| where
+    (ForkNRunHex or MojoDeviation or EpmTyposquat or PipeCategory == "HighRisk")
+    or (PipeCategory == "MediumRisk" and (SmbNear or ServiceNear or SuspParent))
+    or (PipeCategory == "LegacyRPC" and (SmbNear or SuspParent) and OrgPipeCount <= 3)
+| where Severity != "LOW"
+
+// ---- 8) SOC-ready output (HunterDirectives)
+| extend HuntingDirectives = pack_array(
+    strcat("[SUMMARY] Host=", DeviceNameL, " | Account=", AccountName, " | Pipe=", PipeName, " | Cat=", PipeCategory),
+    strcat("[SCORE] Final=", tostring(FinalScore), " | Sev=", Severity,
+           " | Base=", tostring(BaseScore),
+           " | Rarity=", tostring(RarityScore),
+           " | SpreadPen=", tostring(SpreadPenalty),
+           " | Ctx=", tostring(ContextScore),
+           " | BaselineAdj=", tostring(BaselinePenalty)),
+    strcat("[PROCESS] Proc=", Proc, " | Parent=", Parent),
+    iif(ForkNRunHex, "[SIGNAL] Fork-n-Run hex pipe shape (Cobalt Strike class).", ""),
+    iif(MojoDeviation, "[SIGNAL] Mojo pipe deviation (browser masquerade mismatch).", ""),
+    iif(EpmTyposquat, "[SIGNAL] epmapper typosquat (RPC deception pattern).", ""),
+    iif(SmbNear, strcat("[SMB] Near SMB success to ", tostring(RemoteIP), ":", tostring(RemotePort),
+                       iif(PipeNameMatchesSmb, " (NamedPipe matched)", " (NamedPipe not confirmed)")), "[SMB] No near SMB context."),
+    iif(ServiceNear, strcat("[SERVICE] Near ServiceInstalled: ", ServiceName, " | ", ServiceFileName), "[SERVICE] No near service install context."),
+    "[NEXT] Pivot: search PipeName across estate; review process tree; check if SMB source IP has admin tooling; validate service installs/tasks/run-keys on host.",
+    "[CONTAIN] If unauthorized: isolate host; collect memory; enumerate services/tasks/WMI; rotate credentials; hunt sibling C2 beacons."
+)
+| project
+    Timestamp,
+    DeviceName = DeviceNameL,
+    AccountName,
+    PipeName,
+    PipeCategory,
+    Proc,
+    Parent,
+    RemoteIP,
+    RemotePort,
+    ServiceName,
+    ServiceFileName,
+    OrgPipeCount,
+    HostCount,
+    FinalScore,
+    Severity,
+    HuntingDirectives
+| order by FinalScore desc, Timestamp desc
