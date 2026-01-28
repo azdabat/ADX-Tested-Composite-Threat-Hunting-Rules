@@ -31,7 +31,12 @@
 //   SOC-ready summary + directives.
 // ============================================================================
 
-let Lookback = 7d;
+// SENTINEL COMPATIBILITY HEADER
+let DeviceNetworkEvents = DeviceNetworkEvents | extend Timestamp = TimeGenerated;
+let DeviceEvents = DeviceEvents | extend Timestamp = TimeGenerated;
+let DeviceProcessEvents = DeviceProcessEvents | extend Timestamp = TimeGenerated;
+
+let Lookback = 24hr;
 
 // ---- Tunables
 let BeaconingThreshold = 80;         // volume threshold in window
