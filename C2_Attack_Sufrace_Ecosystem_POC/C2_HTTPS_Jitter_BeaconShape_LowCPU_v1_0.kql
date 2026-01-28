@@ -1,0 +1,129 @@
+// ============================================================================
+// COMPOSITE HUNT (L3): C2_HTTPS_Jitter_BeaconShape_LowCPU_v1_0
+// Author: Ala Dabat
+//
+// TRUTH DOMAIN (Minimum Truth Sensors)
+//   - DeviceNetworkEvents: outbound TCP/443 flows with small total bytes
+//
+// WHY THIS EXISTS (Attacker Tradecraft)
+//   Many C2s use HTTPS beacons with semi-regular timing + jitter. This is a "shape" hunt:
+//   protocol-agnostic, infrastructure-agnostic, and resilient to domain rotation.
+//
+// MITRE (Primary Alignment)
+//   - TA0011 Command and Control
+//   - (Commonly expressed via) web protocols (HTTPS) as a C2 transport
+//
+// FRAMEWORK (Your Method)
+//   MINIMUM TRUTH
+//     Repeated outbound connections to same RemoteIP:443 from same process on a host.
+//   CONVERGENCE
+//     Regular-ish intervals + controlled jitter (CV) + small payloads + sufficient count.
+//   REINFORCEMENT
+//     More connections, smaller bytes, tighter interval bounds.
+//   NOISE SUPPRESSION
+//     - Penalize browsers and common cloud agents (don’t hard-drop unless you want to)
+//     - Ignore extreme idle gaps so stdev isn’t garbage
+//     - Group by (DeviceId, RemoteIP, Proc) to avoid cross-entity interval bleed
+//
+// OUTPUT
+//   SOC-ready beacon stats + pivot material.
+// ============================================================================
+
+let lookback = 24h;
+let min_connections = 20;
+let max_payload_bytes = 50000;
+
+// "Soft suppression" categories (penalties instead of hard filters)
+let BrowserLike = dynamic(["chrome.exe","msedge.exe","firefox.exe","brave.exe","opera.exe"]);
+let CommonCloudAgents = dynamic(["teams.exe","onedrive.exe","msedgewebview2.exe"]);
+
+let Net =
+DeviceNetworkEvents
+| where Timestamp >= ago(lookback)
+| where RemotePort == 443
+| where Protocol =~ "Tcp"
+| where isnotempty(RemoteIP)
+| extend Proc = tolower(InitiatingProcessFileName)
+| extend TotalBytes = tolong(coalesce(SentBytes,0)) + tolong(coalesce(ReceivedBytes,0))
+| where TotalBytes <= max_payload_bytes
+| project Timestamp, DeviceId, DeviceName, RemoteIP,
+          Proc,
+          InitiatingProcessCommandLine,
+          InitiatingProcessParentFileName,
+          TotalBytes;
+
+// Partition to prevent prev() bleeding across different entities
+Net
+| partition hint.strategy=native by DeviceId, RemoteIP, Proc (
+    sort by Timestamp asc
+    | serialize
+    | extend PrevTime = prev(Timestamp)
+    | extend IntervalSec = datetime_diff("second", Timestamp, PrevTime)
+    | where isnotnull(PrevTime) and IntervalSec > 0
+    // interval sanity: ignore extreme gaps that distort jitter stats
+    | where IntervalSec between (5 .. 6*60*60)
+    | summarize
+        ConnectionCount   = count(),
+        AvgIntervalSec    = avg(IntervalSec),
+        MinIntervalSec    = min(IntervalSec),
+        MaxIntervalSec    = max(IntervalSec),
+        StdDevIntervalSec = stdev(IntervalSec),
+        AvgBytes          = avg(TotalBytes),
+        FirstSeen         = min(Timestamp),
+        LastSeen          = max(Timestamp),
+        SampleCommand     = any(InitiatingProcessCommandLine),
+        SampleParent      = any(InitiatingProcessParentFileName)
+      by DeviceId, DeviceName, RemoteIP, Proc
+)
+| where ConnectionCount >= min_connections
+| extend JitterRatio = iif(AvgIntervalSec > 0 and isnotnull(StdDevIntervalSec), StdDevIntervalSec / AvgIntervalSec, 0.0)
+| extend
+    IsBrowserLike = iff(Proc in (BrowserLike), 1, 0),
+    IsCommonCloud = iff(Proc in (CommonCloudAgents), 1, 0)
+
+// Scoring (cumulative outcomes → severity)
+| extend
+    BeaconScore =
+          iif(AvgIntervalSec between (10 .. 3600), 20, 0)   // typical beacon window
+        + iif(JitterRatio between (0.02 .. 0.50), 20, 0)    // controlled jitter
+        + iif(AvgBytes <= 5000, 10, 0)                      // tiny payloads
+        + iif(ConnectionCount >= 40, 10, 0)                 // stronger repetition
+        + iif(IsBrowserLike == 1, -15, 0)                   // soft suppression
+        + iif(IsCommonCloud == 1, -10, 0)
+
+| extend Severity = case(
+    BeaconScore >= 45, "HIGH",
+    BeaconScore >= 30, "MEDIUM",
+    BeaconScore >= 20, "LOW",
+    "INFO"
+)
+| where Severity != "INFO"
+| extend HuntingDirectives = pack_array(
+    strcat("[SUMMARY] Host=", DeviceName, " | RemoteIP=", RemoteIP, " | Proc=", Proc),
+    strcat("[SCORE] ", tostring(BeaconScore), " | Sev=", Severity,
+           " | Count=", tostring(ConnectionCount),
+           " | AvgInt=", tostring(AvgIntervalSec), "s",
+           " | JitterCV=", tostring(JitterRatio),
+           " | AvgBytes=", tostring(AvgBytes)),
+    strcat("[EVIDENCE] First=", tostring(FirstSeen), " | Last=", tostring(LastSeen),
+           " | Parent=", tostring(SampleParent)),
+    "[NEXT] Pivot: check same RemoteIP across estate; review process tree; correlate with persistence (tasks/run keys/services) and script/LOLBins.",
+    "[CONTAIN] If unauthorized: isolate host, acquire triage, block destination where possible, hunt for sibling beacons & credential theft."
+)
+| project
+    Severity,
+    BeaconScore,
+    DeviceName,
+    RemoteIP,
+    Proc,
+    ConnectionCount,
+    AvgIntervalSec,
+    StdDevIntervalSec,
+    JitterRatio,
+    AvgBytes,
+    SampleParent,
+    SampleCommand,
+    FirstSeen,
+    LastSeen,
+    HuntingDirectives
+| order by BeaconScore desc, ConnectionCount desc, LastSeen desc
