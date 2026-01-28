@@ -1,7 +1,7 @@
 // ============================================================================
 // COMPOSITE HUNT (L3): C2_NamedPipe_IPC_SMB_ServiceConvergence_v1_0
 // Author: Ala Dabat
-//
+// THIS RULE IS STILL POC/THERE ARE FUNDIMENTAL ISSUES WITH LOOKBACK AND NETWORK JOIN'S CAUSING SIGNIFICANT ISSUES.
 // TRUTH DOMAIN (Minimum Truth Sensors)
 //   - DeviceEvents: Named pipe creation/connection (IPC truth)
 //   - (Reinforcement) DeviceNetworkEvents: SMB sessions / named pipe over SMB when present
