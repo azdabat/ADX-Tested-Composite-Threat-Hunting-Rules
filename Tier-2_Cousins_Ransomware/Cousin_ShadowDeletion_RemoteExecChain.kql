@@ -1,0 +1,64 @@
+// ============================================================================
+// TIER-2 COUSIN — RANSOMWARE: Shadow Deletion via Remote Execution Chain
+// Author: Ala Dabat
+//
+// GOAL
+//   Detect recovery destruction launched remotely:
+//     - vssadmin/wmic deletion
+//     - Parent is remote service execution
+//
+// MINIMUM TRUTH
+//   - Shadow deletion primitive executed
+//
+// REINFORCEMENT
+//   - Remote execution parent (psexecsvc/services.exe/wmiprvse)
+//
+// MITRE
+//   TA0040 Impact (T1490)
+//   TA0008 Lateral Movement (T1021.002)
+// ============================================================================
+
+let lookback = 7d;
+
+let ShadowCommands = dynamic([
+  "vssadmin delete shadows",
+  "wmic shadowcopy delete",
+  "wbadmin delete catalog"
+]);
+
+let RemoteExecParents = dynamic([
+  "psexecsvc.exe",
+  "wmiprvse.exe",
+  "services.exe",
+  "svchost.exe"
+]);
+
+DeviceProcessEvents
+| where Timestamp >= ago(lookback)
+| extend Cmd = tolower(ProcessCommandLine)
+| where Cmd has_any (ShadowCommands)
+
+| extend Parent = tolower(InitiatingProcessParentFileName)
+| extend RemoteParent = Parent has_any (RemoteExecParents)
+
+// Noise gate: only remote context
+| where RemoteParent == true
+
+| summarize
+    FirstSeen = min(Timestamp),
+    CmdSet = make_set(ProcessCommandLine, 5),
+    ParentSet = make_set(InitiatingProcessParentFileName, 3)
+  by DeviceName, AccountName
+
+| extend Severity = "CRITICAL"
+
+| extend HuntingDirectives = pack_array(
+    "[SUMMARY] Shadow copy destruction launched via remote execution.",
+    strcat("[COMMAND] ", tostring(CmdSet)),
+    strcat("[REMOTE PARENT] ", tostring(ParentSet)),
+    "[NEXT] Immediate ransomware response: isolate + credential reset.",
+    "[PIVOT] Search for PsExec/WMI lateral movement preceding event."
+)
+
+| project FirstSeen, DeviceName, AccountName,
+          Severity, HuntingDirectives
