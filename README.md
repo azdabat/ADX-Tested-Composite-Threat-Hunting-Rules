@@ -422,6 +422,42 @@ If the non-negotiable baseline event (“truth”) requires a fundamental **sche
 - API call telemetry → artifact registry/file telemetry  
 - SMB/Service lateral movement → WMI/DCOM lateral movement  
 - DNS protocol telemetry → HTTP protocol telemetry  
+### Rule 1 — Split only when the **Minimum Truth Anchor** changes
+
+Split a composite when the *non-negotiable baseline event* changes in mechanism.
+
+The **Minimum Truth Anchor** is the single unavoidable attacker action the rule is built on.
+
+✅ Reinforcement signals may cross telemetry surfaces (process, registry, file, network)  
+**as long as they remain optional and do not replace the baseline truth.**
+
+---
+
+#### Split when the anchor mechanism changes:
+
+- `services.exe` execution truth → `svchost(schedule)` execution truth  
+- SMB lateral movement truth → WMI/DCOM lateral movement truth  
+- Endpoint execution truth → Identity sign-in truth  
+- Named pipe C2 truth → HTTP beaconing truth  
+
+These are different ecosystems and require separate rules.
+
+---
+
+#### Do NOT split when reinforcement crosses tables:
+
+Example:
+
+- Baseline truth = `svchost(schedule)` spawning suspicious child  
+- Reinforcement = TaskCache registry artifacts  
+- Reinforcement = Task XML drops  
+- Reinforcement = Org prevalence rarity
+
+The truth anchor remains execution — registry is supporting evidence, not the trigger.
+
+---
+
+**Truth defines the rule. Reinforcement strengthens it.**
 
 ---
 
