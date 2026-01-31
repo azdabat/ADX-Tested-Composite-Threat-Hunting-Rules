@@ -1,0 +1,84 @@
+// ============================================================================
+// BURST/NOVELTY COMPOSITE (COREPLUS / L2.5): AD & Domain Recon — BURST + TOOL DIVERSITY + NOVELTY
+// AUTHOR: Ala Dabat
+// STATUS: PRODUCTION HARDENED (tenant tuning expected)
+// DATA: DeviceProcessEvents
+//
+// WHY NO JOINS:
+//   Recon is noisy. The win is NOT extra tables; it’s behavioural reinforcement:
+//     - burst (many recon commands in short window)
+//     - tool diversity (multiple recon binaries)
+//     - novelty (new/rare on that host vs baseline)
+//
+// MITRE:
+//   TA0007 Discovery (various techniques)
+// ============================================================================
+
+let Lookback = 7d;
+let BaselineWindow = 30d;
+let BurstWindow = 15m;
+let MinBurstCount = 6;
+let Threshold = 70;
+
+let TargetProcs = dynamic(["dsquery.exe","dsget.exe","nltest.exe","net.exe","net1.exe","whoami.exe","systeminfo.exe"]);
+let SuspiciousParents = dynamic(["cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe","winword.exe","excel.exe","outlook.exe","mshta.exe"]);
+
+let ReconTokens = dynamic([
+  "dsquery","dsget","/dclist:","/domain_trusts","/trusted_domains","/dsgetdc:",
+  "user","group","computer","server","subnet","ou","site","-limit","-name","-samid",
+  "localgroup","accounts","share","view","use","start","stop",
+  "/all","/priv","/groups","systeminfo"
+]);
+
+// Host baseline counts per tool (how “normal” is this tool on the host)
+let HostBaseline =
+DeviceProcessEvents
+| where Timestamp between (ago(BaselineWindow)..ago(Lookback))
+| where FileName in~ (TargetProcs)
+| summarize BaselineCount=count() by DeviceName, FileName;
+
+DeviceProcessEvents
+| where Timestamp >= ago(Lookback)
+| where FileName in~ (TargetProcs)
+| where isnotempty(ProcessCommandLine)
+| extend Cmd = tolower(tostring(ProcessCommandLine))
+| where Cmd has_any (ReconTokens)
+| extend Parent = tolower(tostring(InitiatingProcessFileName))
+| extend BadParent = toint(Parent in~ (SuspiciousParents))
+| extend BurstBin = bin(Timestamp, BurstWindow)
+| summarize
+    BurstCount = count(),
+    ToolSet = make_set(tolower(FileName), 10),
+    SampleCmds = make_set(substring(Cmd,0,180), 5),
+    AnyBadParent = max(BadParent),
+    FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp)
+  by DeviceName, AccountName, BurstBin
+| extend ToolDiversity = array_length(ToolSet)
+| where BurstCount >= MinBurstCount or ToolDiversity >= 3
+
+// Novelty approximation: join baseline on one representative tool (cheap); use tool diversity + burst as core truth
+| join kind=leftouter (
+    HostBaseline
+    | summarize BaselineToolsSeen = dcountif(FileName, BaselineCount > 0) by DeviceName
+) on DeviceName
+| extend BaselineToolsSeen = coalesce(BaselineToolsSeen, 0)
+| extend
+    BaseScore = 35,
+    BurstScore = iff(BurstCount >= 10, 35, iff(BurstCount >= 6, 25, 10)),
+    DiversityScore = iff(ToolDiversity >= 5, 25, iff(ToolDiversity >= 3, 18, 10)),
+    NoveltyScore = iff(BaselineToolsSeen == 0, 20, iff(BaselineToolsSeen <= 1, 12, 0)),
+    ContextScore = (10 * AnyBadParent),
+    RiskScore = tolong(BaseScore + BurstScore + DiversityScore + NoveltyScore + ContextScore),
+    Severity = case(RiskScore >= 95, "HIGH", RiskScore >= 70, "MEDIUM", "LOW")
+| where RiskScore >= Threshold
+| extend HuntingDirectives = pack_array(
+    "[MIN_TRUTH] Domain/AD recon burst observed (behavioural discovery pattern).",
+    strcat("[SCORE] ", tostring(RiskScore), " | Severity=", Severity),
+    strcat("[BURST] Count=", tostring(BurstCount), " in ", tostring(BurstWindow), " | ToolDiversity=", tostring(ToolDiversity), " | BaselineToolsSeen=", tostring(BaselineToolsSeen)),
+    strcat("[TOOLS] ", tostring(ToolSet)),
+    strcat("[SAMPLES] ", tostring(SampleCmds)),
+    "[NEXT] Validate admin context. If suspicious: pivot to credential access + lateral movement hunts and check for unusual logons, LDAP spikes, or SMB/WMI/WinRM activity in same window."
+)
+| project FirstSeen, LastSeen, DeviceName, AccountName, RiskScore, Severity, BurstCount, ToolDiversity, ToolSet, SampleCmds, HuntingDirectives
+| order by RiskScore desc, LastSeen desc
