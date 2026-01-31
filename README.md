@@ -276,6 +276,27 @@ This table maps your composites to ecosystems and their cousins, with MITRE tech
 
 ---
 
+## Cousin Ecosystem Discovery (Empirical Validation)
+
+This framework is not built on theoretical MITRE grouping — it is built on **empirically discovered cousin ecosystems**.
+
+Cousin rules represent:
+
+- adjacent attack surfaces
+- the same attacker capability expressed through different telemetry anchors
+- reinforcement without monolithic kill-chain correlation
+
+All cousin relationships in this repository are validated through:
+
+- **ADX-Docker simulation**
+- **Empire-style telemetry**
+- repeated convergence across persistence + execution surfaces
+
+ Full living discovery journal here:  
+**Cousin_Discovery_Log.md** → https://github.com/azdabat/Production-READY-Composite-Threat-Hunting-Rules/blob/main/Cousin_Discovery_Log.md
+
+---
+
 ## Ecosystem Table — Composites + Cousins (Roadmap)
 
 | Ecosystem | Primary Composite | MITRE Technique | Cousin Composite (Planned/POC) | MITRE | Notes |
