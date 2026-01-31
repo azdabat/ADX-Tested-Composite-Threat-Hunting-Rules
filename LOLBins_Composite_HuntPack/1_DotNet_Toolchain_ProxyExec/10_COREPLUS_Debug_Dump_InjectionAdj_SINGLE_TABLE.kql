@@ -1,0 +1,61 @@
+// ============================================================================
+// SINGLE-TABLE COMPOSITE (COREPLUS / L2.5): Developer / Debugger / Injection-Adjacent Tooling
+// AUTHOR: Ala Dabat
+// STATUS: PRODUCTION HARDENED (tenant tuning expected)
+// DATA: DeviceProcessEvents
+//
+// WHY NO JOINS:
+//   The cmdline/tool choice is already a strong signal (debuggers, dumps, injection util).
+//
+// MITRE:
+//   T1003.001 (OS Credential Dumping: LSASS) [when lsass targeted]
+//   T1055 (Process Injection) [mavinject / inject flags]
+// ============================================================================
+
+let Lookback = 7d;
+let Threshold = 70;
+
+let TargetProcs = dynamic(["cdb.exe","windbg.exe","procdump.exe","werfault.exe","taskmgr.exe","mavinject.exe","dllhost.exe"]);
+let SuspiciousParents = dynamic(["cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe","winword.exe","excel.exe","outlook.exe","mshta.exe"]);
+
+let AllowStrings = dynamic([
+  "sysinternals",
+  "microsoft\\windows\\diagnostics",
+  "intune",
+  "defender"
+]);
+
+DeviceProcessEvents
+| where Timestamp >= ago(Lookback)
+| where FileName in~ (TargetProcs)
+| where isnotempty(ProcessCommandLine)
+| extend Cmd = tolower(tostring(ProcessCommandLine))
+| extend Parent = tolower(tostring(InitiatingProcessFileName))
+| where not(Cmd has_any (AllowStrings))
+| extend
+    TargetsLSASS = toint(Cmd has "lsass" or Cmd has "-ma lsass" or Cmd has "-mp lsass"),
+    HasDumpFlags = toint(Cmd has_any (".dump","-ma","-mp","-p "," -pn ","/processid:")),
+    HasDebuggerFlags = toint(tolower(FileName) in ("cdb.exe","windbg.exe") and Cmd has_any ("-c ","!","-p","-pn")),
+    HasInject = toint(tolower(FileName) == "mavinject.exe" and Cmd has_any ("/injectrunning","/running")),
+    BadParent = toint(Parent in~ (SuspiciousParents))
+| extend
+    BaseScore = 45,
+    ActionScore =
+        (60 * TargetsLSASS) +
+        (25 * HasDumpFlags) +
+        (25 * HasDebuggerFlags) +
+        (40 * HasInject),
+    ContextScore = (10 * BadParent),
+    RiskScore = tolong(BaseScore + ActionScore + ContextScore),
+    Severity = case(RiskScore >= 140, "CRITICAL", RiskScore >= 100, "HIGH", RiskScore >= 70, "MEDIUM", "LOW")
+| where RiskScore >= Threshold
+| extend HuntingDirectives = pack_array(
+    "[MIN_TRUTH] Debug/diagnostic/injection-adjacent tooling executed.",
+    strcat("[SCORE] ", tostring(RiskScore), " | Severity=", Severity),
+    strcat("[PROC] ", FileName, " | Parent=", tostring(InitiatingProcessFileName)),
+    strcat("[CMD] ", substring(Cmd, 0, 260)),
+    iif(TargetsLSASS==1, "[NEXT] LSASS targeted: treat as potential credential dumping. Isolate if needed, capture memory, hunt for credential theft + lateral movement.", 
+       "[NEXT] Validate tool legitimacy (developer/admin). If suspicious: review process tree, signed status, and follow-on persistence/exfil.")
+)
+| project Timestamp, DeviceName, AccountName, FileName, RiskScore, Severity, InitiatingProcessFileName, ProcessCommandLine, HuntingDirectives
+| order by RiskScore desc, Timestamp desc
