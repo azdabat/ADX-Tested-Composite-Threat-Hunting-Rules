@@ -1,33 +1,32 @@
 // ============================================================================
-// COMPOSITE HUNT (L2 / L2.5): Scheduled Task Abuse (Creation / Modification) — RUNDLL-AWARE (Hardened)
+// COMPOSITE HUNT (L2 / L2.5): Scheduled Task Abuse (Creation / Modification) — RUNDLL-AWARE
 // AUTHOR: Ala Dabat
-// VERSION: 2026-01 (Composite Framework Rewrite - Hardened v2)
-// MITRE: T1053.005 (Scheduled Task/Job: Scheduled Task)
-// DATA: DeviceProcessEvents (MDE / Sentinel) [+ optional follow-on pivots in other hunts]
+// VERSION: 2026-01 (Production Hardened v3)
+// DATA: DeviceProcessEvents (MDE Advanced Hunting / Sentinel)
+// MITRE:
+//   - T1053.005  Scheduled Task
+//   - T1218.011  Rundll32
+//   - T1218      Signed Binary Proxy Execution (general LOLBin surface)
+//   - T1059.001  PowerShell
+//   - T1059.005  VBScript (wscript/cscript)
+//   - T1059.007  JavaScript (mshta / script protocol handlers)
 // ---------------------------------------------------------------------------
-// WHY THIS EXISTS (Framework / Operational Reality):
-//   Minimum Truth  : A scheduled task is created or changed (schtasks.exe /create or /change)
-//   Reinforcement  : The task action (/tr) is dangerous (LOLBins/script engines/rundll truth models) OR points to writable paths
-//   Noise Control  : Suppress obvious OS maintenance/updaters + common vendor task patterns + Program Files task actions
-//   Analyst Output : Extract TaskName (/tn), TaskRun (/tr), RunAs (/ru), Schedule (/sc + /mo), and classify the action into a hunting-ready category.
+// MINIMUM TRUTH (Truth Anchor):
+//   schtasks.exe executes /create or /change
 //
-// ATTACK CHAIN COVERAGE (Where this fits in the ecosystem):
-//   This hunt covers the PERSISTENCE slice: "Task Creation/Change + Dangerous Task Action".
-//   It does NOT replace execution-phase rundll32 hunts (LNK/Office direct execution), but it DOES:
-//     - detect persistence that uses rundll32/script engines,
-//     - classify the rundll32 action into execution-model categories,
-//     - and provide explicit pivots into your rundll32 execution hunt pack.
+// REINFORCEMENT (Confidence Builders):
+//   - Task action uses dangerous primitives (script engines / encoded / LOLBins)
+//   - Task action points to user-writable paths
+//   - Rundll32 execution-model classification inside /tr (script/proto, remote, INF proxy, etc.)
+//   - XML import, especially from writable paths
 //
-// RUNDLL-AWARE CLASSIFICATION (inside /tr):
-//   - Rundll32 Script/Protocol Handler Abuse (javascript/vbscript/mshtml/scrobj)      [HIGH fidelity]
-//   - Rundll32 Remote Load (UNC/WebDAV/URL)                                          [HIGH fidelity]
-//   - Rundll32 INF ProxyExec (advpack/LaunchINFSection/setup*)                       [HIGH fidelity]
-//   - Rundll32 Control_RunDLL misuse (non-.cpl)                                      [context gated]
-//   - Rundll32 Ordinal / Obfuscation (,#1 / traversal / short paths)                 [context gated]
+// NOISE CONTROL:
+//   - Suppress obvious OS maintenance/updaters via parent allowlist + keywords
+//   - Suppress Program Files task actions unless script engine or rundll32 is involved
 //
-// NOTES:
-//   - This query is built for "low noise, high fidelity". Tenant tuning is expected for allowlists.
-//   - If tasks are created via PowerShell/WMI COM APIs (not schtasks.exe), you need a sibling rule on those surfaces.
+// OUTPUT:
+//   - Extract TaskName (/tn), TaskRun (/tr), RunAs (/ru), Schedule (/sc), Modifier (/mo)
+//   - Classify attacker tradecraft for analyst routing + pivots
 // ============================================================================
 
 let Lookback = 7d;
@@ -62,13 +61,14 @@ let Rundll_ControlToken      = "control_rundll";
 // --------------------
 let AllowInitiatingParents = dynamic([
   "sihclient.exe","usoclient.exe","trustedinstaller.exe","tiworker.exe",
-  "msiexec.exe","setuphost.exe","omadmclient.exe"
+  "msiexec.exe","setuphost.exe","omadmclient.exe","ccmexec.exe","wuauclt.exe"
 ]);
 
 let AllowKeywords = dynamic([
   "\\microsoft\\windows\\",
   "onedrive","teams","edgeupdate","googleupdate",
-  "sccm","ccm","intune","defender","microsoft update"
+  "sccm","ccm","intune","defender","microsoft update",
+  "microsoftedgeupdatetask","microsoft edge update"
 ]);
 
 // --------------------
@@ -77,39 +77,62 @@ let AllowKeywords = dynamic([
 DeviceProcessEvents
 | where Timestamp >= ago(Lookback)
 | where FileName =~ "schtasks.exe"
+| where isnotempty(ProcessCommandLine)
 | extend Cmd = tolower(tostring(ProcessCommandLine))
 | where Cmd has_any ("/create", "/change")
 
 // --------------------
-// 3) Parse task parameters (robust-ish extraction for common quoting patterns)
-//    NOTE: schtasks is messy; we handle quoted and unquoted values.
+// 3) Parse task parameters (handle quoted + unquoted reliably)
 // --------------------
 | extend
-    TaskName = extract(@"(?i)(?:/tn\s+)(?:""([^""]+)""|([^\s]+))", 1, ProcessCommandLine),
-    TaskRunRaw = extract(@"(?i)(?:/tr\s+)(?:""([^""]+)""|([^\s]+))", 1, ProcessCommandLine),
-    RunAs = extract(@"(?i)(?:/ru\s+)(?:""([^""]+)""|([^\s]+))", 1, ProcessCommandLine),
-    Schedule = extract(@"(?i)/sc\s+([^\s]+)", 1, ProcessCommandLine),
-    Modifier = extract(@"(?i)/mo\s+([^\s]+)", 1, ProcessCommandLine),
+    TaskName_q = extract(@"(?i)(?:/tn\s+)(?:""([^""]+)""|([^\s]+))", 1, ProcessCommandLine),
+    TaskName_u = extract(@"(?i)(?:/tn\s+)(?:""([^""]+)""|([^\s]+))", 2, ProcessCommandLine),
+    TaskName   = coalesce(TaskName_q, TaskName_u),
+
+    TaskRun_q  = extract(@"(?i)(?:/tr\s+)(?:""([^""]+)""|([^\s]+))", 1, ProcessCommandLine),
+    TaskRun_u  = extract(@"(?i)(?:/tr\s+)(?:""([^""]+)""|([^\s]+))", 2, ProcessCommandLine),
+    TaskRunRaw = coalesce(TaskRun_q, TaskRun_u),
+
+    RunAs_q    = extract(@"(?i)(?:/ru\s+)(?:""([^""]+)""|([^\s]+))", 1, ProcessCommandLine),
+    RunAs_u    = extract(@"(?i)(?:/ru\s+)(?:""([^""]+)""|([^\s]+))", 2, ProcessCommandLine),
+    RunAs      = coalesce(RunAs_q, RunAs_u),
+
+    Schedule   = extract(@"(?i)/sc\s+([^\s]+)", 1, ProcessCommandLine),
+    Modifier   = extract(@"(?i)/mo\s+([^\s]+)", 1, ProcessCommandLine),
+
+    TaskXml_q  = extract(@"(?i)(?:/xml\s+)(?:""([^""]+)""|([^\s]+))", 1, ProcessCommandLine),
+    TaskXml_u  = extract(@"(?i)(?:/xml\s+)(?:""([^""]+)""|([^\s]+))", 2, ProcessCommandLine),
+    TaskXmlPath = coalesce(TaskXml_q, TaskXml_u),
+
     UsingXML = toint(Cmd has "/xml")
 
 | extend
-    TaskRun = coalesce(TaskRunRaw, "XML_or_ParseFail"),
-    TaskRunL = tolower(tostring(TaskRunRaw)),
+    TaskRun   = coalesce(TaskRunRaw, iif(UsingXML==1, "XML_or_ParseFail", "ParseFail")),
+    TaskRunL  = tolower(coalesce(TaskRunRaw, "")),
+    TaskXmlL  = tolower(coalesce(TaskXmlPath, "")),
+
     ParentProc = tolower(tostring(InitiatingProcessFileName)),
     IsCreate = toint(Cmd has "/create"),
     IsChange = toint(Cmd has "/change"),
     HasTR = toint(isnotempty(TaskRunRaw)),
-    RunsAsSystem = toint(Cmd has_any ("system","nt authority\\system")),
-    SuspSchedule = toint(tolower(Schedule) has_any ("onlogon","onstart","minute","hourly") or Cmd has "/mo"),
+
+    RunAsL = tolower(coalesce(RunAs,"")),
+    RunsAsSystem = toint(RunAsL has "system" or Cmd has "/ru system" or Cmd has "/ru \"nt authority\\system\""),
+
+    ScheduleL = tolower(coalesce(Schedule,"")),
+    SuspSchedule = toint(ScheduleL has_any ("onlogon","onstart","minute","hourly") or Cmd has "/mo"),
+
     HiddenTaskHints = toint(Cmd has_any ("/f","/rl highest","/it","/z"))
 
 // --------------------
 // 4) Reinforcement: action danger + writable path + rundll execution-model categorisation
-//    HARDENING UPDATE: Checks Cmd primarily to prevent regex evasion on extracted fields
 // --------------------
 | extend
     UsesWritablePath = toint(TaskRunL has_any (WritablePaths) or Cmd has_any (WritablePaths)),
     UsesScriptEngine = toint(TaskRunL has_any (ScriptEngines) or Cmd has_any (ScriptEngines)),
+
+    // XML import path reinforcement
+    XmlFromWritable = toint(UsingXML==1 and TaskXmlL has_any (WritablePaths)),
 
     // Rundll-aware (Check Cmd to ensure detection even if /tr extraction fails)
     TR_IsRundll = toint(Cmd has "rundll32"),
@@ -121,11 +144,11 @@ DeviceProcessEvents
     TR_Rundll_PathObfus = toint(Cmd has "rundll32" and (Cmd has_any (Rundll_ObfusHints) or Cmd matches regex @"\.\.\\"))
 
 // --------------------
-// 5) Minimum Truth + Composite gating (avoid "task creation noise")
+// 5) Composite gating (avoid “task creation noise”)
 //    Must have: dangerous action OR writable path OR rundll truth category OR XML import.
 // --------------------
-| where UsesScriptEngine == 1 
-     or UsesWritablePath == 1 
+| where UsesScriptEngine == 1
+     or UsesWritablePath == 1
      or TR_IsRundll == 1
      or UsingXML == 1
 
@@ -134,14 +157,16 @@ DeviceProcessEvents
 // --------------------
 | where not(ParentProc in~ (AllowInitiatingParents))
 | where not(Cmd has_any (AllowKeywords))
-// FIXED BLINDSPOT: Only exclude Program Files if it is NOT a script engine or rundll
-| where not(Cmd has "\\program files\\" and UsesScriptEngine == 0 and TR_IsRundll == 0)
+
+// Suppress Program Files task actions unless script engine or rundll32 is involved
+| extend InProgramFiles = toint(Cmd has "\\program files\\" or Cmd has "\\program files (x86)\\")
+| where not(InProgramFiles==1 and UsesScriptEngine==0 and TR_IsRundll==0)
 
 // --------------------
-// 7) Category (attack-model classification)
+// 7) Category (attacker tradecraft model)
 // --------------------
 | extend TaskActionCategory = case(
-    UsingXML == 1 and UsesWritablePath == 1, "Task_XML_Import_From_WritablePath",
+    UsingXML == 1 and XmlFromWritable == 1, "Task_XML_Import_From_WritablePath",
     UsingXML == 1, "Task_XML_Import_Unknown_Action",
     TR_Rundll_ScriptProto == 1, "Rundll32_ScriptProtocol_Handler_Abuse",
     TR_Rundll_Remote      == 1, "Rundll32_Remote_UNC_WebDAV_URL_Load",
@@ -156,18 +181,16 @@ DeviceProcessEvents
 )
 
 // --------------------
-// 8) Scoring (simple, explainable; per-category weights)
-//    - Truth: scheduled task creation/change + extracted /tr
-//    - Reinforcement: dangerous action + rundll truth model + writable path + privilege/schedule
+// 8) Scoring (explainable + cumulative)
 // --------------------
 | extend
     BaseScore =
         0
         + iif(IsCreate == 1, 10, 0)
         + iif(IsChange == 1, 8, 0)
-        + iif(HasTR == 1, 12, 0),
+        + iif(HasTR == 1, 12, 0)
+        + iif(UsingXML == 1, 8, 0),
 
-    // category weights (rundll truth models are stronger)
     CategoryScore = case(
         TaskActionCategory == "Rundll32_ScriptProtocol_Handler_Abuse", 55,
         TaskActionCategory == "Rundll32_Remote_UNC_WebDAV_URL_Load", 50,
@@ -187,33 +210,34 @@ DeviceProcessEvents
         0
         + iif(UsesWritablePath == 1, 20, 0)
         + iif(UsesScriptEngine == 1, 20, 0)
+        + iif(XmlFromWritable == 1, 20, 0)
         + iif(RunsAsSystem == 1, 18, 0)
         + iif(SuspSchedule == 1, 12, 0)
         + iif(HiddenTaskHints == 1, 10, 0)
-        + iif(UsingXML == 1, 10, 0),
 
-    RiskScore = tolong(BaseScore + CategoryScore + ContextScore),
+| extend RiskScore = tolong(BaseScore + CategoryScore + ContextScore)
 
-    Severity = case(
-        RiskScore >= 90, "CRITICAL",
-        RiskScore >= 70, "HIGH",
-        RiskScore >= 50, "MEDIUM",
-        "LOW"
-    )
+| extend Severity = case(
+    RiskScore >= 90, "CRITICAL",
+    RiskScore >= 70, "HIGH",
+    RiskScore >= 50, "MEDIUM",
+    "LOW"
+)
 
-// Hard gate: keep it quiet
+// Production hard gate (quiet-by-default)
 | where RiskScore >= 50
 
 // --------------------
-// 9) Hunter-first directives (explicit pivots into your other hunts)
+// 9) Hunter-first directives (explicit pivots)
 // --------------------
 | extend
     Pivot_RundllHunt = case(
-        TaskActionCategory startswith "Rundll32_", "PIVOT: Run Rundll32 execution hunt pack for this host/user (ScriptProtocol/Remote/INF/Control/Obfus) within ±24h and scope by similar TaskRun strings.",
-        "PIVOT: If task action is script engine, pivot into PowerShell/LOLBin execution hunts within ±24h."
+        TaskActionCategory startswith "Rundll32_",
+          "PIVOT: Run Rundll32 execution hunt pack for this host/user (ScriptProtocol/Remote/INF/Control/Obfus) within ±24h and scope by similar TaskRun strings.",
+          "PIVOT: If task action is a script engine, pivot into PowerShell/LOLBin execution hunts within ±24h."
     ),
     Pivot_Persistence = "PIVOT: Check for related persistence around same time: services, WMI subscriptions, registry Run keys, startup folder writes.",
-    Pivot_Staging = "PIVOT: Inspect referenced path(s) for recent file writes/downloads in Temp/Public/ProgramData; check file signer + hash reputation; look for archive/staging activity.",
+    Pivot_Staging = "PIVOT: Inspect referenced path(s) for recent file writes/downloads in Temp/Public/ProgramData; verify signer + hash reputation; look for archive/staging activity.",
     Pivot_Lateral = "PIVOT: If RunsAsSystem or remote paths: scope for lateral movement (SMB/RDP/WMI), new admin shares access, suspicious remote logons.",
 
     HunterDirective = pack_array(
@@ -224,6 +248,7 @@ DeviceProcessEvents
                iif(isempty(Modifier), "", strcat(" | /mo ", Modifier))),
         strcat("[ACTION] Category=", TaskActionCategory,
                " | XML=", tostring(UsingXML),
+               " | XmlFromWritable=", tostring(XmlFromWritable),
                " | UsesWritablePath=", tostring(UsesWritablePath),
                " | UsesScriptEngine=", tostring(UsesScriptEngine),
                " | SYSTEM=", tostring(RunsAsSystem),
@@ -232,12 +257,13 @@ DeviceProcessEvents
         strcat("[SCORE] ", tostring(RiskScore), " | Severity=", Severity,
                " | Base=", tostring(BaseScore), " | Category=", tostring(CategoryScore), " | Context=", tostring(ContextScore)),
         strcat("[TR] ", substring(TaskRun, 0, 260)),
+        iif(UsingXML==1, strcat("[XML] ", substring(TaskXmlPath, 0, 260)), "[XML] <none>"),
         strcat("[PARENT] ", tostring(InitiatingProcessFileName), " | ", substring(tostring(InitiatingProcessCommandLine),0,180)),
         Pivot_RundllHunt,
         Pivot_Persistence,
         Pivot_Staging,
         Pivot_Lateral,
-        "[NEXT] Validate change ticket/owner. If unapproved: isolate if needed, collect task XML, capture referenced binaries/scripts, and begin scoped hunt for follow-on execution."
+        "[NEXT] Validate change ticket/owner. If unapproved: collect task XML (if used), capture referenced binaries/scripts, and scope for follow-on execution."
     )
 
 | project
@@ -255,6 +281,9 @@ DeviceProcessEvents
     RunsAsSystem,
     UsesWritablePath,
     UsesScriptEngine,
+    UsingXML,
+    TaskXmlPath,
+    XmlFromWritable,
     InitiatingProcessFileName,
     ProcessCommandLine,
     HunterDirective
