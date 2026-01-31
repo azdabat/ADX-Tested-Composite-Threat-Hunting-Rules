@@ -291,7 +291,27 @@ This table maps your composites to ecosystems and their cousins, with MITRE tech
 | **Credential Access** | *(existing rule needed)* | T1003 | `LSASS_Access_Cousin` | T1003.001 | DCSync / NTLM Harvest twin |
 | **Identity Abuse (OAuth/Token)** | *(MITRE coverage from threat model SOP)* | T1621 / T1078.004 | `Identity_ConsentGrant_Cousin` | T1621 | Token replay vs lateral token misuse |
 | **Persistence (File/Driver)** | *(POC/Research)* | T1547 / T1543 | `Driver_Persistence_Cousin` | T1543.008 | KMDF/Driver load surface |
+---
 
+## Ecosystem Design & Architecture (Where the “Cousins” Concept Lives)
+
+This repository isn’t a random collection of hunts — it’s organised as **ecosystem coverage**.
+
+Each rule is built as a **clean sensor** using the same doctrine:
+
+- **Minimum Truth** (the non-negotiable anchor that proves the technique exists)
+- **Reinforcement** (confidence boosters, not dependencies)
+- **Noise Suppression** (tenant reality: allowlists/baselines)
+- **Hunter Directives** (SOC-ready next steps + pivots)
+
+Some ecosystems are **attack-surface ecosystems** (same surface, many variants), while others are **cousin-based ecosystems** (same attacker intent, different truth surfaces — separate sensors by design).
+
+Full design doctrine, naming strategy, and the complete ecosystem model (including cousin mapping and split/keep rules) lives here:
+
+https://github.com/azdabat/Production-READY-Composite-Threat-Hunting-Rules/blob/main/Ecosystem_Deaign_Architecture.md
+
+--- 
+```
 ---
 
 ## Framework Logic Behind Cousin Pairing
