@@ -1,48 +1,158 @@
 // ============================================================================
 // WMI-A2B_L2_Fileless_Consumer_Execution_Scrcons_Substrate (Composite L2)
 // Author: Ala Dabat
-// Version: 2026-01-15 (v2)
+// Version: 2026-01-15 (v2.1) — Reinforcement-Only (No Truth Changes)
 // Platform: Microsoft Defender XDR Advanced Hunting (MDE)
-// Tables: DeviceImageLoadEvents (required), DeviceNetworkEvents (optional), DeviceProcessEvents (optional)
-// MITRE: T1546.003 (WMI Event Subscription), T1047 (WMI), TA0011 (C2)
-// Status: PRODUCTION READY (Temporal Joins Fixed)
+// Tables: DeviceImageLoadEvents (required), DeviceNetworkEvents (optional)
+// MITRE:
+//   - T1546.003 WMI Event Subscription
+//   - T1047     Windows Management Instrumentation
+//   - TA0011    Command and Control (reinforcement only)
+// Status: PRODUCTION READY (Reinforcement-only additions)
 // ============================================================================
-let lookback = 7d;
-let TimeWindow = 1m; // Very tight window for C2 beaconing
+//
+// MINIMUM TRUTH (Baseline Anchor)
+//   scrcons.exe loads a script engine DLL (vbscript/jscript/scrobj).
+//
+// REINFORCEMENT (Confidence Only — never required)
+//   R1: Tight-window network (scrcons.exe HTTP/HTTPS within ±1m)         -> strong indicator
+//   R2: Rarity / prevalence of scrcons-script-engine loading per device  -> prioritisation
+//   R3: FolderPath anomaly (non-system DLL path)                         -> high suspicion
+//
+// IMPORTANT
+//   - Rule fires on baseline truth even with zero reinforcement.
+//   - Reinforcement only changes Severity + directives.
+// ============================================================================
+
+let lookback   = 7d;
+let TimeWindow = 1m;      // reinforcement correlation window (tight on purpose)
+let RarityLB   = 30d;     // for prevalence reinforcement only
 
 let ScriptEngines = dynamic(["vbscript.dll","jscript.dll","scrobj.dll"]);
 
-let L2_Base = 
-    DeviceImageLoadEvents
-    | where Timestamp >= ago(lookback)
-    | where InitiatingProcessFileName =~ "scrcons.exe"
-    | where FileName in~ (ScriptEngines)
-    | extend DeviceId, Timestamp, DllName = FileName, FolderPath, Account = InitiatingProcessAccountName;
+// ----------------------------
+// L2 BASELINE (Truth Anchor)
+// ----------------------------
+let L2_Base =
+DeviceImageLoadEvents
+| where Timestamp >= ago(lookback)
+| where InitiatingProcessFileName =~ "scrcons.exe"
+| where FileName in~ (ScriptEngines)
+| extend
+    BaseTime   = Timestamp,
+    DeviceId,
+    DeviceName,
+    Account    = coalesce(InitiatingProcessAccountName, AccountName),
+    DllName    = tostring(FileName),
+    DllPath    = tostring(FolderPath),
+    DllPathL   = tolower(tostring(FolderPath))
+| project BaseTime, DeviceId, DeviceName, Account, DllName, DllPath, DllPathL;
 
+// ----------------------------
+// REINFORCEMENT R1 (Optional): Tight network proximity
+// ----------------------------
+let R1_Net =
+DeviceNetworkEvents
+| where Timestamp >= ago(lookback)
+| where InitiatingProcessFileName =~ "scrcons.exe"
+| where RemotePort in (80,443) or RemoteUrl has_any ("http","https")
+| project NetTime = Timestamp, DeviceId, RemoteUrl=tostring(RemoteUrl), RemoteIP=tostring(RemoteIP), RemotePort;
+
+// ----------------------------
+// REINFORCEMENT R2 (Optional): Device prevalence for this behaviour
+// (Rarity is prioritisation only; never truth.)
+// ----------------------------
+let R2_Prevalence =
+DeviceImageLoadEvents
+| where Timestamp >= ago(RarityLB)
+| where InitiatingProcessFileName =~ "scrcons.exe"
+| where FileName in~ (ScriptEngines)
+| summarize DeviceSeenDays = dcount(bin(Timestamp, 1d)) by DeviceId;
+
+// ----------------------------
+// REINFORCEMENT R3 (Optional): DLL path anomaly
+// If the “script engine” is loading from non-system dirs, that’s extremely suspicious.
+// ----------------------------
+let IsSystemPath = (path:string) {
+    tolower(path) startswith "c:\\windows\\system32\\"
+    or tolower(path) startswith "c:\\windows\\syswow64\\"
+    or tolower(path) startswith "c:\\windows\\winsxs\\"
+};
+
+// ----------------------------
+// JOIN ONLY FOR REINFORCEMENT (No change to truth)
+// ----------------------------
 L2_Base
-| join kind=leftouter (
-    DeviceNetworkEvents
-    | where Timestamp >= ago(lookback)
-    | where InitiatingProcessFileName =~ "scrcons.exe"
-    | where RemotePort in (80,443) or RemoteUrl has_any ("http","https")
-    | project NetTime = Timestamp, DeviceId, RemoteUrl, RemoteIP
-) on DeviceId
-// *** THE FIX: Temporal Constraint ***
-| where isnull(NetTime) or abs(NetTime - Timestamp) <= TimeWindow
-| summarize 
-    HasNet  = max(toint(isnotnull(NetTime))),
-    NetUrls = make_set(RemoteUrl, 10),
-    NetIPs  = make_set(RemoteIP, 10),
-    Evidence = any(strcat("scrcons loaded ", DllName))
-    by Timestamp, DeviceId, DeviceName, Account
+| join kind=leftouter (R2_Prevalence) on DeviceId
+| join kind=leftouter (R1_Net) on DeviceId
+| extend HasNet =
+    toint(isnotempty(NetTime) and abs(NetTime - BaseTime) <= TimeWindow)
+| extend
+    // R2: rare-on-device heuristic (you can tune this threshold per tenant)
+    DeviceSeenDays = coalesce(DeviceSeenDays, 0),
+    IsRareOnDevice = toint(DeviceSeenDays <= 1),
 
+    // R3: DLL path anomaly
+    NonSystemDllPath = toint(IsSystemPath(DllPath) == false),
+
+    // Reinforcement score (never defines truth)
+    ReinforcementScore =
+        (60 * HasNet) +
+        (20 * IsRareOnDevice) +
+        (30 * NonSystemDllPath),
+
+    // Baseline truth is always met here by construction
+    TotalScore = 50 + ReinforcementScore
+| summarize
+    FirstSeen = min(BaseTime),
+    LastSeen  = max(BaseTime),
+    HasNet    = max(HasNet),
+    NetUrls   = make_set_if(RemoteUrl, HasNet == 1, 10),
+    NetIPs    = make_set_if(RemoteIP,  HasNet == 1, 10),
+    AnyRareOnDevice = max(IsRareOnDevice),
+    AnyNonSystemDll = max(NonSystemDllPath),
+    Evidence = make_set(strcat("scrcons loaded ", DllName, " from ", DllPath), 10),
+    MaxTotalScore = max(TotalScore)
+  by DeviceId, DeviceName, Account
 | extend Severity = case(
-    HasNet == 1, "HIGH",
+    HasNet == 1 and AnyNonSystemDll == 1, "CRITICAL",
+    HasNet == 1,                           "HIGH",
+    AnyNonSystemDll == 1,                  "HIGH",
+    AnyRareOnDevice == 1,                  "MEDIUM",
     "MEDIUM"
 )
 | extend HunterDirectives = case(
-    Severity == "HIGH", "HIGH: scrcons.exe loaded script engine AND beaconed to network. Potential Fileless Persistence execution.",
-    "MEDIUM: scrcons.exe loaded script engine. Check for legitimate WMI scripts (SCCM/Monitoring)."
+    Severity == "CRITICAL",
+        strcat(
+          "CRITICAL: Baseline truth met (scrcons script engine substrate) + network beacon AND non-system DLL path.\n",
+          "1) Treat as fileless WMI consumer execution until disproven.\n",
+          "2) Immediately review NetUrls/NetIPs and scope for same infra.\n",
+          "3) Validate WMI permanent subscription artifacts (Filter/Consumer/Binding) in root\\\\subscription.\n",
+          "4) Check if any enterprise management tool legitimately uses scrcons scripting on this host."
+        ),
+    Severity == "HIGH" and HasNet == 1,
+        strcat(
+          "HIGH: scrcons.exe loaded script engine and made near-time HTTP/HTTPS connection.\n",
+          "1) Investigate RemoteUrl/RemoteIP; check for beaconing/repeat.\n",
+          "2) Validate whether SCCM/monitoring is expected; if not, escalate.\n",
+          "3) Hunt backwards: who registered the consumer/filter? (PowerShell Register-WmiEvent / Set-WmiInstance / mofcomp)."
+        ),
+    Severity == "HIGH" and AnyNonSystemDll == 1,
+        strcat(
+          "HIGH: scrcons.exe loaded a script engine DLL from a non-system path.\n",
+          "1) This is extremely abnormal—validate DLL on disk (hash/signature).\n",
+          "2) Investigate how the DLL landed there (file events, installer, suspicious parent)."
+        ),
+    Severity == "MEDIUM" and AnyRareOnDevice == 1,
+        "MEDIUM: Baseline truth met and behaviour is rare on this device. Validate host role and expected WMI scripts; promote if repeated or paired with network.",
+    "MEDIUM: Baseline substrate detected (scrcons script engine load). Confirm whether legitimate management tooling uses WMI consumers on this host; monitor for network reinforcement."
 )
-| project Timestamp, Severity, DeviceName, Account, Evidence, HasNet, NetUrls, HunterDirectives
-| order by Severity desc
+| project
+    FirstSeen, LastSeen,
+    Severity, MaxTotalScore,
+    DeviceName, DeviceId, Account,
+    HasNet, NetUrls, NetIPs,
+    AnyRareOnDevice, AnyNonSystemDll,
+    Evidence,
+    HunterDirectives
+| order by Severity desc, MaxTotalScore desc, LastSeen desc;
