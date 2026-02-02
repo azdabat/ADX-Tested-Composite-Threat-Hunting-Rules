@@ -121,7 +121,7 @@ The attack is only true when **both occur together**.
 ## Composite Threat Hunt Portfolio
 
 
-##  Tier-1 Baseline Pack (Enterprise Mandatory Ecosystems)
+##  Tier-1 Baseline Pack (Enterprise Mandatory Ecosystems) - SAMPLE
 
 These are the **minimum required behavioural ecosystems** for any regulated enterprise (finance, insurance, gov).
 
@@ -150,7 +150,7 @@ Tier-2 introduces:
 - Kill-chain convergence  
 - Noise suppression through context  
 
-These are **SOC-safe composites** built on Tier-1 truths.
+These are **SOC-safe composites** built on Tier-1 truths.(SAMPLE)
 
 | Ecosystem | Minimum Truth Anchor | Composite Reinforcement Layer | Status | Maturity |
 |----------|----------------------|------------------------------|--------|----------|
@@ -165,7 +165,7 @@ These are **SOC-safe composites** built on Tier-1 truths.
 
 ---
 
-##  Tier-3 Research & Novel Threat Ecosystems (POC + Emerging Tradecraft)
+##  Tier-3 Research & Novel Threat Ecosystems (POC + Emerging Tradecraft) - SAMPLE
 
 Tier-3 covers:
 
