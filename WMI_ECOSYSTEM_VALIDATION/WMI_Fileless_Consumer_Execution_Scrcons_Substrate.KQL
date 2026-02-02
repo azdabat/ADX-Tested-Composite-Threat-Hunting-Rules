@@ -29,7 +29,7 @@ let L2_Base =
 DeviceImageLoadEvents
 | where Timestamp >= ago(lookback)
 | where InitiatingProcessFileName =~ "scrcons.exe"
-| where FileName in~ (ScriptEngines)
+| where FileName in~ (ScriptEngines) // vbscript.dll","jscript.dll","scrobj.dll loaded into scrcons is a closed process like word macros and are unseen by analysts. This is where the attack lives
 | extend
     BaseTime = Timestamp,
     DeviceId,
@@ -51,7 +51,7 @@ DeviceNetworkEvents
 | extend
     NetTime = Timestamp,
     DeviceId,
-    NetPID   = tolong(InitiatingProcessId),
+    NetPID   = tolong(InitiatingProcessId), // Always catch on PID, in case Device telemetry does not correlate within the attack ecosystem. SEE: PID Renforcement join.
     RemoteUrl = tostring(RemoteUrl),
     RemoteIP  = tostring(RemoteIP),
     RemotePort
@@ -65,8 +65,7 @@ DeviceImageLoadEvents
 | where Timestamp >= ago(RarityLB)
 | where InitiatingProcessFileName =~ "scrcons.exe"
 | where FileName in~ (ScriptEngines)
-| summarize DeviceSeenDays = dcount(bin(Timestamp, 1d)) by DeviceId;
-
+| summarize DeviceSeenDays = dcount(bin(Timestamp, 1d)) by DeviceId; // Has this specific device seen this behavior on only 1 day (or fewer) in the last 30 days
 // ----------------------------
 // Base + prevalence + path anomaly
 // ----------------------------
@@ -75,8 +74,8 @@ L2_Base
 | join kind=leftouter (R2_Prevalence) on DeviceId
 | extend
     DeviceSeenDays = coalesce(DeviceSeenDays, 0),
-    IsRareOnDevice = toint(DeviceSeenDays <= 1),
-    NonSystemDllPath = toint(IsSystemPath(DllPath) == false);
+    IsRareOnDevice = toint(DeviceSeenDays <= 1),                   //IsRareOnDevice == 1: "This is the first time (or the only day) we have ever seen this happen on this machine." -> Suspicious.
+    NonSystemDllPath = toint(IsSystemPath(DllPath) == false);      //IsRareOnDevice == 0: "This machine does this all the time (on 2+ different days)." -> Likely Benign (Noise).
 
 // ----------------------------
 // Reinforcement Join Strategy
@@ -85,20 +84,20 @@ L2_Base
 // ----------------------------
 let PID_Path =
 BaseWithPrev
-| where isnotnull(PID)
+| where isnotnull(PID)                 //demands that the exact same Process ID (PID) is responsible for both the base event (e.g., the Image Load) and the network event.                            
 | join kind=leftouter (R1_Net) on DeviceId
 | extend
-    PIDMatch = toint(isnotnull(NetPID) and PID == NetPID),
-    TimeMatch = toint(isnotempty(NetTime) and abs(datetime_diff("second", NetTime, BaseTime)) <= TimeWindowSeconds),
-    HasNet = toint(PIDMatch == 1 and TimeMatch == 1);
-
+    PIDMatch = toint(isnotnull(NetPID) and PID == NetPID),      // If scrcons.exe (PID 5555) is matched with a network connection else if chrome.exe (PID 9999), this becomes 0. It only becomes 1 if the PIDs match perfectly.              
+    TimeMatch = toint(isnotempty(NetTime) and abs(datetime_diff("second", NetTime, BaseTime)) <= TimeWindowSeconds), // returns 1 only if the network connection happened within your defined window (e.g., 60 seconds) of the process event.
+    HasNet = toint(PIDMatch == 1 and TimeMatch == 1);   // HasNet = 1 if same device and same PID happened at the same time.
+                                                     
 let Fallback_Path =
 BaseWithPrev
-| where isnull(PID)
-| join kind=leftouter (R1_Net) on DeviceId
+| where isnull(PID)                          //This ensures this block only runs on the specific rows that the previous "High Fidelity" block threw away. & It prevents double-counting. If a row had a PID, it was already handled by the PID_Path.
+| join kind=leftouter (R1_Net) on DeviceId   // Because it cannot match on specific process execution (PID), it falls back to the only thing it knows: "It happened on this specific machine.
 | extend
-    TimeMatch = toint(isnotempty(NetTime) and abs(datetime_diff("second", NetTime, BaseTime)) <= TimeWindowSeconds),
-    HasNet = toint(TimeMatch == 1);
+    TimeMatch = toint(isnotempty(NetTime) and abs(datetime_diff("second", NetTime, BaseTime)) <= TimeWindowSeconds), // Since we can't verify who made the connection (Process A vs Process B), we have to rely entirely on "When" it happened.
+    HasNet = toint(TimeMatch == 1);                                                                                  // If scrcons.exe (with no PID) ran at 12:00:00, and any network connection left this device at 12:00:01, we will assume they are related
 
 // ----------------------------
 // Combine + Score (reinforcement only)
