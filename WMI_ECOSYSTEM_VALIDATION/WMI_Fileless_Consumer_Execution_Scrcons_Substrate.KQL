@@ -147,3 +147,9 @@ union PID_Path, Fallback_Path
     Evidence,
     HunterDirectives
 | order by Severity desc, MaxTotalScore desc, LastSeen desc
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//NOTES
+//PID_Path (Previous Step): High Precision. Almost zero False Positives.
+//Fallback_Path (This Step): High Sensitivity, Higher False Positives.
+//Risk: If scrcons.exe runs at the exact same second that a user browses a website, this fallback path might incorrectly flag that website as being connected to scrcons.
