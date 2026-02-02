@@ -1329,10 +1329,164 @@ Operational correlation happens **outside** individual rules:
 
 The complete operational correlation + Sentinel engineering model lives here:
 
-➡️ **Operational Correlation & Deployment Guide**  
+ **Operational Correlation & Deployment Guide**  
 https://github.com/azdabat/Production-READY-Composite-Threat-Hunting-Rules/blob/main/Operational_Correlation_Deployment.md
 
 This is how Tier-1 composite truths become Tier-2 incidents — **without monoliths, without ghost chains, and without noise collapse.**
+
+---
+
+## Rules That Sit *Outside* Ecosystems (Router / Surface Composites)
+**The final piece of the Puzzle**
+
+Not every Composite Hunt belongs inside a single attack ecosystem.
+
+In production, there is a second class of rules:
+
+> **Router Rules** (Surface Aggregators)
+
+These are *not* deep ecosystem truths.  
+They are wide, low-cost detectors that identify **persistence intent across multiple surfaces**, then route the analyst into the correct ecosystem composite.
+
+---
+
+### Two Rule Types in This Framework
+
+This framework contains **two distinct composite classes**:
+
+---
+
+### Type 1 — Ecosystem Truth Rules (Deep Composites)
+
+These rules anchor to a single ecosystem and prove a minimum truth artifact.
+
+They answer:
+
+> “Is this specific attack mechanism real?”
+
+Examples:
+
+- **Scheduled Task Ecosystem**
+  - Minimum truth: Task creation + payload execution path
+
+- **Registry RunKey Ecosystem**
+  - Minimum truth: Run/RunOnce write + writer context
+
+- **WMI Permanent Subscription Ecosystem**
+  - Minimum truth: scrcons substrate + consumer/binding artifacts
+
+These rules are high-fidelity and ecosystem-pure.
+
+---
+
+### Type 2 — Router / Surface Rules (Outside Ecosystems)
+
+These rules sit *above* ecosystems.
+
+They do not prove one mechanism.
+
+They answer:
+
+> “Is persistence being attempted anywhere, and where should we pivot next?”
+
+They detect broad intent across multiple persistence surfaces:
+
+- Tasks  
+- Services  
+- Run keys  
+- WMIC adjacencies  
+- PowerShell persistence creation  
+
+They are **directional sensors**, not final truth.
+
+---
+
+## Clear-as-Day Example
+
+### Router Rule Fires:
+
+> `schtasks.exe /create ... powershell -enc ...`
+
+Router output:
+
+- Surface detected: Scheduled Task persistence intent  
+- Severity: HIGH  
+- Directive: Pivot into ScheduledTask_Abuse composite
+
+This is not the full ecosystem truth yet.  
+It is a persistence entry vector.
+
+---
+
+### Ecosystem Composite Confirms:
+
+ScheduledTask_Abuse then proves:
+
+- `/tr` payload path
+- rundll32/script engine abuse
+- writable directory staging
+- rarity + reinforcement
+
+Now persistence truth is confirmed.
+
+---
+
+## Why Router Rules Exist
+
+Router rules solve the real SOC problem:
+
+- Attackers do not stay in one ecosystem
+- Analysts cannot run 12 deep composites manually
+- Engineering teams need early surface visibility
+
+Router rules provide:
+
+- Fast detection
+- Cheap scanning
+- Correct ecosystem routing
+- Consistent HunterDirectives
+
+---
+
+## Correct Deployment Model
+
+### Step 1 — Deploy Router Sensors
+
+Example:
+
+- Persistence_Surface_Router_CorePlus.kql
+
+Purpose:
+
+- Flag persistence intent early
+- Route analysts into the correct cousin ecosystem
+
+---
+
+### Step 2 — Ecosystem Composites Provide Truth
+
+Examples:
+
+- Scheduled_Task_Abuse.kql
+- Registry_Persistence_Userland_Autoruns.kql
+- WMI_Permanent_Subscription_Persistence.kql
+
+These confirm the mechanism.
+
+---
+
+## Key Framework Rule
+
+**Router rules detect intent.**  
+**Ecosystem rules confirm truth.**
+
+Router composites sit outside ecosystems by design.
+
+This prevents monoliths while keeping full surface coverage.
+
+---
+
+
 
 ---
 
