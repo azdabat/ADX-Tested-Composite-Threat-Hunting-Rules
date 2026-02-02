@@ -20,7 +20,7 @@ This work (including all KQL queries, detection logic, documentation, and the "M
 > [!NOTE]
 > **Operational Calibration & Testing**
 >
-> These detection rules are architected for **logical correctness** and **high-fidelity signal extraction**. Validation was performed in an isolated **ADX-Docker** environment to ensure attack-truth and logic integrity.
+> These detection rules are architected for **logical correctness** and **high-fidelity signal extraction**. Validation was performed in an isolated **ADX-Docker** environment to ensure attack-truth and logic integrity using Empire threat telemetry & Atomic Red-Team.
 >
 > Please note:
 > * **Baselines:** Final noise tuning and allow-listing require specific tenant telemetry and administrative context.
