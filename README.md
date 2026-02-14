@@ -192,7 +192,7 @@ This ecosystem model maps directly into the GitHub structure:
 
 | Repository | Role in Framework |
 |-----------|------------------|
-| **Production-READY-Composite-Threat-Hunting-Rules** | Tier-1/Tier-2 deployable composites |
+| **ADX-Tested-Composite-Threat-Hunting-Rules** | Tier-1/Tier-2 deployable composites |
 | **Attack-Ecosystems-and-POC** | Tier-3 novel threats + emerging tradecraft |
 | **THREAT-MODELLING-SOP-Behavioural-Patch-Resistant-TTPs** | Architectural doctrine + design rules |
 
