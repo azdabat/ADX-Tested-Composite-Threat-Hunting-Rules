@@ -52,7 +52,7 @@ Each entry records:
 
 ---
 
-# ✅ Confirmed Cousins (So Far)
+#  Confirmed Cousins (So Far)
 
 ---
 
