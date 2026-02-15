@@ -25,8 +25,16 @@ This work (including all KQL queries, detection logic, documentation, and the "M
 > Please note:
 > * **Baselines:** Final noise tuning and allow-listing require specific tenant telemetry and administrative context.
 > * **Syntax:** Minor syntax variances (e.g., path escaping) may exist due to the difference between Docker-hosted Kusto and live Cloud schemas.
-> * **Readiness:** This is not a copy & paste production ready repo, everything here is untested unless there are "receipts" to prove they have i.e. ADX-Docker Empire Telemetry results, and full README.MD's for each rule. This is engineering work, not a basic KQL repo. It takes time, iteration, testing tuning and so on... I am documenting the process of creating logic from scratch. My POC repo where my brittle monoliths exist is the start, this composite section is the philosophy behind refinement and real threat detection engineering. Nothing in this repo is copied, nothing has been borrowed. This document is mean't to teach you/me how to think, because anyone who has been in the trenches knows that engineering freedom is only found when the architecture becomes "simple" and easy to understand.
-> *  **This is "Dectection-As-Code"** 
+> [!IMPORTANT]
+> **Operational Readiness & Integrity**
+>
+> * **Not "Plug-and-Play":** This is not a copy-paste production repository. Every rule here is considered **untested** unless accompanied by "receipts"—specifically ADX-Docker Empire telemetry results and dedicated documentation.
+> * **Engineering vs. Scripting:** This is a record of engineering work, not a basic KQL collection. It represents the iterative process of testing, tuning, and refining logic from scratch.
+> * **The Evolution:** While my legacy POC repositories contain the "brittle monoliths" of my early career, this composite section represents the philosophy of true detection engineering.
+> * **Originality:** Nothing in this repository is copied; nothing has been borrowed. This documentation is designed to teach a way of thinking. 
+> * **The Goal:** As anyone who has been in the trenches knows: engineering freedom is only found when architecture becomes simple, reductive, and easy to understand.
+> 
+> **This is "Detection-As-Code" in its purest form.**
 
 # Threat Hunting Philosophy & Detection Design
 
