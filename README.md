@@ -34,7 +34,7 @@ This work (including all KQL queries, detection logic, documentation, and the "M
 > * **Originality:** Nothing in this repository is copied; nothing has been borrowed. This documentation is designed to teach a way of thinking. 
 > * **The Goal:** As anyone who has been in the trenches knows: engineering freedom is only found when architecture becomes simple, reductive, and easy to understand.
 > 
-> **This is "Detection-As-Code" in its purest form.**
+> **This is "Detection-As-Code" in its purest form.** (Fully automated CI/CD pipeline section currently under development)
 
 # Threat Hunting Philosophy & Detection Design
 
