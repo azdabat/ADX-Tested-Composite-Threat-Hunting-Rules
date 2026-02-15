@@ -1486,7 +1486,174 @@ This prevents monoliths while keeping full surface coverage.
 
 ---
 
-# 🗺️ Next Step: The Attack Ecosystem ATLAS
+# Architecture Doctrine: The "Minimum Truth" Framework
+
+## 1. The Core Philosophy
+In enterprise-scale environments (100k+ endpoints), traditional Detection Engineering fails at the database layer. The standard industry approach relies on "Monolithic Queries"—massive, multi-table `join` operations executed across raw telemetry. This results in query timeouts, extreme compute costs, and what we define as **"Bleak Outcomes."**
+
+The **"Minimum Truth"** framework flips this paradigm. 
+
+Instead of asking the database to correlate everything at once, we force the query to establish the absolute minimum baseline of malicious truth *first*, discard the rest of the noise, and only then enrich the surviving data.
+
+### The Three Pillars of Minimum Truth:
+1. **Filter Before You Join:** Never join two raw tables. Reduce the primary table to its most critical subset (the "Truth") before asking for context.
+2. **Native Enrichment Over Joins:** Modern EDR schemas (like `DeviceRegistryEvents`) often contain implicit context (e.g., `InitiatingProcessFileName`). We extract and map these native fields to avoid costly `DeviceProcessEvents` joins entirely.
+3. **Contextual Scoring, Not Binary Alerts:** Once the truth is established, we do not alert immediately. We route the surviving data through a convergence matrix to assign a mathematical Risk Score based on behavioral context.
+
+---
+
+## . Case Study: Registry Persistence (TaskCache)
+To demonstrate this doctrine in production, we examine the `Registry_Persistence_Background_Service_TaskCache` rule. 
+
+Advanced adversaries bypass standard `schtasks.exe` monitoring by interacting directly with the Registry TaskCache via COM/API. Tracking this requires querying `DeviceRegistryEvents`—one of the noisiest tables in any SIEM. A traditional join to find the process responsible would crash the tenant. 
+
+Here is how the Minimum Truth framework solves this gracefully.
+
+### Phase 1: Establish the Minimum Truth (The Funnel)
+Instead of looking at all registry events, we immediately restrict the dataset to specific high-value keys and define our "Danger" and "Safe" parameters dynamically.
+
+### Phase 2: The "Zero-Join" Process Mapping
+*Notice the optimization in the code below.* Instead of executing a heavy `join` to `DeviceProcessEvents` to find out *who* wrote to the registry, we extract the `InitiatingProcess*` fields natively present in the optimized schema. This eliminates massive memory pressure.
+
+### Phase 3: The "Safe Join" (Prevalence)
+The only `join` permitted in this framework is an optimized, pre-summarized join. We summarize `DeviceFileEvents` down to a tiny `OrgPrevalence` table *first*, and then `leftouter` join it to our already-filtered Registry events. **Small table joined to small table.**
+
+### Phase 4: Convergence Scoring
+The remnant data is evaluated against a matrix (Is it a large blob? Is it base64? Is the writer rare?). It is scored and outputted with a direct, context-rich directive for the SOC analyst.
+
+---
+
+## 3. The Code Execution
+
+```kusto
+// ============================================================================
+// COMPOSITE HUNT (L3): Registry_Persistence_Background_Service_TaskCache
+// TRUTH DOMAIN: DeviceRegistryEvents (Optimized Schema)
+// MINIMUM TRUTH: RegistryValueSet under Services OR Schedule TaskCache (Tree/Tasks).
+// ============================================================================
+
+let lookback = 14d;
+
+// 1. DYNAMIC LISTS & NOISE SUPPRESSION RULES
+let TrustedPublishers = dynamic(["Microsoft Corporation","Microsoft Windows","Google LLC","Mozilla Corporation"]);
+let TrustedInitiators = dynamic(["msiexec.exe","trustedinstaller.exe","sppsvc.exe","intunemanagementextension.exe","updateinstaller.exe"]);
+
+let BackgroundKeys = dynamic([
+  @"system\currentcontrolset\services",
+  @"software\microsoft\windows nt\currentversion\schedule\taskcache\tree",
+  @"software\microsoft\windows nt\currentversion\schedule\taskcache\tasks"
+]);
+
+let UserWritableRx   = @"(?i)^[a-z]:\\(users|public|programdata|temp|downloads|appdata)\\";
+let Base64ChunkedRx  = @"(?:[A-Za-z0-9+/]{20,}={0,2})(?:\s+[A-Za-z0-9+/]{20,}={0,2})+";
+let IPv4Rx           = @"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b";
+let DomainRx         = @"\b([a-z0-9][a-z0-9-]{1,62}\.)+[a-z]{2,}\b";
+let UrlRx            = @"https?://[^\s'""<>]+";
+
+let DangerTokens = dynamic([
+  "powershell","pwsh","cmd.exe","mshta","rundll32","regsvr32","wscript","cscript",
+  "certutil","bitsadmin","curl","-enc","-encodedcommand","frombase64string","http:","https:"
+]);
+
+let SafePathAnchors = dynamic([@"c:\program files", @"c:\program files (x86)", @"c:\windows\system32", @"c:\windows\syswow64"]);
+let SafeVendorKeywords = dynamic(["windows update","microsoft","google","edge","mozilla","firefox","onedrive","teams","intel","nvidia","amd","realtek","adobe","citrix"]);
+
+let PayloadSizeThreshold = 500;
+
+// 2. THE PRE-SUMMARIZED JOIN TABLE (Optimization)
+let OrgPrevalence =
+  DeviceFileEvents
+  | where Timestamp >= ago(30d)
+  | summarize WriterDeviceCount = dcount(DeviceId) by SHA256;
+
+// 3. ESTABLISHING MINIMUM TRUTH
+let Raw =
+  DeviceRegistryEvents
+  | where Timestamp >= ago(lookback)
+  | where ActionType == "RegistryValueSet"
+  | extend RK = tolower(tostring(RegistryKey)),
+           RVN = tolower(tostring(RegistryValueName)),
+           RVD = tolower(tostring(RegistryValueData))
+  | where RK has_any (BackgroundKeys);
+
+// 4. THE ZERO-JOIN ENRICHMENT & SAFE JOIN
+// Mapping InitiatingProcess* fields directly to Writer* variables to bypass DeviceProcessEvents join.
+let Enriched =
+  Raw
+  | extend
+      WriterFile    = tostring(InitiatingProcessFileName),
+      WriterCL      = tostring(InitiatingProcessCommandLine),
+      WriterSHA     = tostring(InitiatingProcessSHA256),
+      WriterSigner  = tostring(InitiatingProcessSigner), 
+      WriterCompany = tostring(InitiatingProcessVersionInfoCompanyName),
+      WriterUser    = tostring(InitiatingProcessAccountName)
+  | extend
+      WriterFileL = tolower(coalesce(WriterFile,"")),
+      WriterCLL   = tolower(coalesce(WriterCL,"")),
+      WriterTrustedPublisher = toint(WriterCompany in (TrustedPublishers) or WriterSigner in (TrustedPublishers)),
+      WriterTrustedInitiator = toint(WriterFileL in (TrustedInitiators))
+  // Safe Join: Joining our summarized table to our strictly filtered 'Raw' dataset
+  | join kind=leftouter OrgPrevalence on $left.WriterSHA == $right.SHA256
+  | extend WriterDeviceCount = coalesce(WriterDeviceCount, 0),
+           WriterIsRare = toint(WriterDeviceCount <= 2);
+
+// 5. CONVERGENCE SCORING & FILTERING
+Enriched
+| extend
+    IsService = toint(RK has "system\\currentcontrolset\\services"),
+    IsTaskCache = toint(RK has "schedule\\taskcache"),
+    ServiceImagePathWrite = toint(IsService==1 and (RVN == "imagepath" or RVN has "imagepath")),
+    HasDanger = toint(RVD has_any (DangerTokens) or WriterCLL has_any (DangerTokens)),
+    HasBase64 = toint(RVD matches regex Base64ChunkedRx or WriterCLL matches regex Base64ChunkedRx),
+    HasNet    = toint(RVD matches regex UrlRx or RVD matches regex IPv4Rx or RVD matches regex DomainRx),
+    PointsWritable = toint(RVD matches regex UserWritableRx),
+    IsLargeBlob = toint(strlen(RVD) > PayloadSizeThreshold),
+    IsSafePath = toint(RVD has_any (SafePathAnchors)),
+    IsSafeVendor = toint(RVD has_any (SafeVendorKeywords) or RVN has_any (SafeVendorKeywords)),
+    UntrustedWriter = toint(WriterTrustedPublisher == 0);
+
+// Enforce Minimum Truth
+| where (IsService==1 or IsTaskCache==1)
+| where (IsTaskCache==1) or (ServiceImagePathWrite==1) or (HasDanger==1) or (PointsWritable==1) or (IsLargeBlob==1)
+
+// Enforce Noise Suppression
+| where not(IsSafePath==1 and IsSafeVendor==1 and HasDanger==0 and HasBase64==0 and HasNet==0 and PointsWritable==0 and IsLargeBlob==0)
+| where not(WriterTrustedInitiator==1 and (HasDanger + HasBase64 + HasNet + PointsWritable + IsLargeBlob) == 0)
+
+// Calculate Risk
+| extend
+    BaseScore = 55,
+    Score_TaskCache = 25 * IsTaskCache,
+    Score_Service   = 20 * ServiceImagePathWrite,
+    Score_Danger    = 25 * HasDanger,
+    Score_Base64    = 20 * HasBase64,
+    Score_Net       = 10 * HasNet,
+    Score_Writable  = 15 * PointsWritable,
+    Score_Blob      = 25 * IsLargeBlob,
+    Score_UntrustedWriter = 10 * UntrustedWriter,
+    Score_RareWriter = 10 * WriterIsRare,
+    RiskScore = BaseScore + Score_TaskCache + Score_Service + Score_Danger + Score_Base64 + Score_Net + Score_Writable + Score_Blob + Score_UntrustedWriter + Score_RareWriter,
+    RiskLevel = case(RiskScore >= 120, "CRITICAL", RiskScore >= 90, "HIGH", RiskScore >= 70, "MEDIUM", "LOW")
+
+// 6. ACTIONABLE OUTPUT
+| where RiskLevel in ("MEDIUM","HIGH","CRITICAL")
+| extend DecodedPayload = base64_decode_string(tostring(extract(@"([A-Za-z0-9+/]{40,})", 1, RegistryValueData)))
+| project
+    Timestamp, DeviceName, DecodedPayload, AccountName = coalesce(WriterUser, tostring(AccountName)),
+    RegistryKey, RegistryValueName, RegistryValueData,
+    PersistenceClass = case(IsTaskCache==1,"TaskCache(SilentTask)", ServiceImagePathWrite==1,"Service(ImagePath)", "Background(Other)"),
+    WriterProcess = WriterFile, WriterCommandLine = WriterCL, WriterCompany, WriterSigner, WriterSHA, WriterDeviceCount,
+    RiskScore, RiskLevel
+| extend HunterDirective = case(
+    RiskLevel=="CRITICAL" and PersistenceClass startswith "TaskCache", "CRITICAL: Silent Scheduled Task persistence via TaskCache (API/COM). Pull task definition, isolate if unauthorized.",
+    RiskLevel=="CRITICAL" and PersistenceClass startswith "Service", "CRITICAL: Service persistence set (ImagePath) with strong indicators. Validate service name + binary path.",
+    RiskLevel=="HIGH", "HIGH: Background persistence registry artifact. Pivot to writer ancestry.",
+    "MEDIUM: Background persistence signal. Validate if approved updater/agent; if not, escalate."
+)
+| order by RiskScore desc, Timestamp desc
+```
+
+#  Next Step: The Attack Ecosystem ATLAS
 
 While this repository provides the **tactical sensors** (the KQL code and logic), understanding how these sensors fit together requires a strategic map.
 
