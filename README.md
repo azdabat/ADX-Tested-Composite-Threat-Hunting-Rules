@@ -987,7 +987,7 @@ Otherwise:
 - correlate at the incident layer
 - This prevents ghost chains and keeps hunts operational.
 
-- # ✅ Composite Rule Template v1.0 (Minimum Truth → Reinforcement → Convergence)
+- # Composite Rule Template v1.0 (Minimum Truth → Reinforcement → Convergence)
 
 This is the fixed structure I use for all production-grade behavioural detections.
 
