@@ -209,7 +209,7 @@ Intent-first anchoring raises base confidence.
 
 # 5. Composite Framework Integration
 
-Your framework becomes structurally complete when both are explicitly defined.
+This framework becomes structurally complete when both are explicitly defined.
 
 ### Layered Model
 
