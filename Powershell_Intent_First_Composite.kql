@@ -1,0 +1,181 @@
+// ============================================================================
+// COMPOSITE HUNT (L2/L2.5) — PowerShell Malicious Primitive (Intent-First)
+// Author: Ala Dabat
+//
+// DOCTRINE PRESERVED:
+// - Minimum Truth is INTENT-FIRST: PowerShell performs a malicious primitive (capability)
+// - Reinforcement: parent lineage risk, public egress proximity, prevalence rarity
+// - Noise Control: burst modelling + prevalence (NO hard allowlists)
+// - Joins: summarized small->small only
+//
+// NOTE ON TELEMETRY:
+// - Uses DeviceProcessEvents + DeviceNetworkEvents (MDE/Sentinel)
+// - Avoids “EncodedCommand alone” by requiring primitive families/convergence
+// ============================================================================
+
+let Lookback = 14d;
+let PrevalenceLB = 30d;
+let CorrelationWindow = 5m;
+
+// ----------------------------
+// Intent primitives (family-based, not one token)
+// ----------------------------
+let PSBins = dynamic(["powershell.exe","pwsh.exe"]);
+
+// Download cradle primitives (capability: remote retrieval)
+let DownloadTokens = dynamic([
+  "invoke-webrequest","iwr","invoke-restmethod","irm",
+  "system.net.webclient","downloadstring","downloadfile",
+  "start-bitstransfer","bitsadmin","curl","wget"
+]);
+
+// Decode/unpack primitives (capability: payload decode)
+let DecodeTokens = dynamic([
+  "frombase64string","convert]::frombase64string",
+  "gzipstream","deflatestream","io.compression",
+  "text.encoding]::unicode","text.encoding]::utf8"
+]);
+
+// Direct execution primitives (capability: execute content)
+let ExecTokens = dynamic([
+  "iex","invoke-expression","& (","invoke-command",
+  "reflection.assembly","assembly::load","add-type"
+]);
+
+// Parent risk families (reinforcement, not allowlist)
+let SuspiciousParents = dynamic([
+  "winword.exe","excel.exe","powerpnt.exe","outlook.exe",
+  "wscript.exe","cscript.exe","mshta.exe","rundll32.exe","regsvr32.exe",
+  "cmd.exe","wmiprvse.exe","svchost.exe"
+]);
+
+// ----------------------------
+// Baseline: intent-first minimum truth
+// PowerShell + at least TWO primitive families in the same commandline.
+// (This avoids brittle single-token hits.)
+// ----------------------------
+let Base =
+DeviceProcessEvents
+| where Timestamp >= ago(Lookback)
+| where FileName in~ (PSBins)
+| extend CL = tolower(ProcessCommandLine)
+| extend
+    HasDownload = toint(CL has_any (DownloadTokens)),
+    HasDecode   = toint(CL has_any (DecodeTokens)),
+    HasExec     = toint(CL has_any (ExecTokens)),
+    PrimitiveFamilies = HasDownload + HasDecode + HasExec
+// INTENT-FIRST truth: capability implied by >=2 families
+| where PrimitiveFamilies >= 2
+| project
+    Timestamp, DeviceId, DeviceName,
+    AccountName, InitiatingProcessAccountName,
+    FileName, ProcessCommandLine,
+    InitiatingProcessFileName, InitiatingProcessCommandLine,
+    ProcessId, InitiatingProcessId,
+    HasDownload, HasDecode, HasExec, PrimitiveFamilies;
+
+// ----------------------------
+// Reinforcement R1: parent lineage risk (no allowlist; just signal)
+// ----------------------------
+let R1_Parent =
+Base
+| extend IsSuspiciousParent = toint(tolower(InitiatingProcessFileName) has_any (SuspiciousParents))
+| project Timestamp, DeviceId, ProcessId, IsSuspiciousParent;
+
+// ----------------------------
+// Reinforcement R2: public egress proximity (small summarize -> join)
+// ----------------------------
+let R2_Egress =
+DeviceNetworkEvents
+| where Timestamp >= ago(Lookback)
+| where InitiatingProcessFileName in~ (PSBins)
+| where RemoteIPType == "Public"
+| summarize EgressTime=min(Timestamp), PublicConnCount=count() by DeviceId, InitiatingProcessId
+| project DeviceId, ProcessId=InitiatingProcessId, EgressTime, PublicConnCount;
+
+// ----------------------------
+// Noise Control: prevalence + burst modelling (no hard exclusions)
+// 1) Prevalence: how many devices run this exact primitive fingerprint?
+// 2) Burst: does this appear across many devices in short window (automation)?
+// ----------------------------
+let Prevalence =
+DeviceProcessEvents
+| where Timestamp >= ago(PrevalenceLB)
+| where FileName in~ (PSBins)
+| extend Fingerprint = tostring(hash_sha256(tolower(ProcessCommandLine)))
+| summarize FP_DeviceCount=dcount(DeviceId), FP_ExecCount=count() by Fingerprint;
+
+let Burst =
+Base
+| summarize BurstDeviceCount=dcount(DeviceId) by bin(Timestamp, 10m);
+
+// ----------------------------
+// Join + scoring (discount not bypass; rarity only after truth)
+// ----------------------------
+Base
+| extend Fingerprint = tostring(hash_sha256(tolower(ProcessCommandLine)))
+
+// Join reinforcements
+| join kind=leftouter R1_Parent on DeviceId, ProcessId
+| join kind=leftouter R2_Egress on DeviceId, ProcessId
+| join kind=leftouter Prevalence on Fingerprint
+| join kind=leftouter Burst on bin(Timestamp, 10m)
+
+// Normalize nulls
+| extend
+    IsSuspiciousParent = coalesce(IsSuspiciousParent, 0),
+    PublicConnCount = coalesce(PublicConnCount, 0),
+    HasPublicEgress = toint(PublicConnCount > 0),
+    FP_DeviceCount = coalesce(FP_DeviceCount, 0),
+    FP_IsRare = toint(FP_DeviceCount <= 2),
+    BurstDeviceCount = coalesce(BurstDeviceCount, 0),
+    IsBurst = toint(BurstDeviceCount >= 50)   // tune per tenant size
+
+// Scoring
+| extend
+    BaseScore = 25, // intent-first truth already met (primitive convergence)
+    Score_Primitives = case(
+        PrimitiveFamilies >= 3, 25,
+        PrimitiveFamilies == 2, 15,
+        0
+    ),
+    Score_Parent = IsSuspiciousParent * 15,
+    Score_Egress = HasPublicEgress * 15,
+    Score_Rare   = FP_IsRare * 15,
+    // Burst discount (automation likely): discount, NOT bypass
+    Discount_Burst = iif(IsBurst == 1, -20, 0)
+
+| extend RawScore = BaseScore + Score_Primitives + Score_Parent + Score_Egress + Score_Rare + Discount_Burst
+
+// High-risk floor: if primitives include all 3 families, don't bury it
+| extend Score = iif(PrimitiveFamilies >= 3 and RawScore < 45, 45, RawScore)
+
+| extend Severity = case(Score >= 70, "CRITICAL", Score >= 55, "HIGH", Score >= 40, "MEDIUM", "LOW")
+| where Severity in ("MEDIUM","HIGH","CRITICAL")
+
+| extend HunterDirective = strcat(
+    "ACTION: ", Severity, " PowerShell Primitive Review | ",
+    "Truth(Intent): PrimitiveFamilies=", tostring(PrimitiveFamilies),
+    " (Download=", tostring(HasDownload), " Decode=", tostring(HasDecode), " Exec=", tostring(HasExec), "). ",
+    "Reinf: SuspParent=", tostring(IsSuspiciousParent),
+    " PublicEgress=", tostring(HasPublicEgress), " RareFP=", tostring(FP_IsRare),
+    " Burst=", tostring(IsBurst),
+    " | PIVOT: Inspect full commandline + parent chain. If egress present, pivot RemoteUrl/RemoteIP and scope same Fingerprint across estate."
+)
+
+| project
+    Timestamp,
+    Severity,
+    Score,
+    DeviceName,
+    AccountName,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine,
+    FileName,
+    ProcessCommandLine,
+    PublicConnCount,
+    EgressTime,
+    FP_DeviceCount,
+    BurstDeviceCount,
+    HunterDirective
+| order by Score desc, Timestamp desc
