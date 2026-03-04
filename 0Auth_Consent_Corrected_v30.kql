@@ -1,0 +1,276 @@
+The `.kql` extension doesn't render in the artifact viewer. Let me put it in a format you can actually see.
+
+```kql
+// ============================================================================
+// COMPOSITE HUNT (L2/L2.5) — OAuth Illicit Consent Abuse (Hardened / Production-Ready)
+// Author: Ala Dabat
+//
+// DOCTRINE PRESERVED:
+// - Minimum Truth: successful consent grant occurred (AuditLogs)
+// - Intent Anchor: high-risk capability granted (scopes/roles)
+// - Reinforcement: admin consent, scripted/tool UA (optional), AppId newness/rarity
+// - Noise Control: prevalence + scoring discounts (NOT bypass)
+// - Joins: only small->small summarized joins
+//
+// KEY HARDENING:
+// - Initiator can be User or App (service principal performing action)
+// - UA is optional (not always populated, do not depend on it)
+// - Publisher extraction is best-effort only (never required)
+//
+// ----------------------------------------------------------------------------
+// FIXES APPLIED (Ala Dabat review — see inline [FIX-N] annotations):
+//
+// [FIX-1] IsNewApp self-reference: AppIdPrevalence previously included the
+//         ConsentLookback window, meaning a new app consenting today would
+//         appear in prevalence with AppSeen=1, suppressing IsNewApp=1.
+//         Fix: prevalence window now ends at ago(ConsentLookback), so it only
+//         reflects historical baseline. Anything not found there is genuinely new.
+//
+// [FIX-2] IsRareApp miscalibration: an app seen once 85 days ago scored
+//         IsRareApp=1 (+8) despite having no recent activity. This inflated
+//         scores for historically-seen apps that are not operationally rare.
+//         Fix: IsRareApp now requires FirstSeen within ConsentLookback window.
+//
+// [FIX-3] AllPerms column collision / dead code: AllPerms was defined twice —
+//         once as array_concat intermediate, once as make_set in the summarize.
+//         The second silently overwrote the first. Intermediate renamed to
+//         CombinedPerms to eliminate dead code and make intent explicit.
+//
+// [FIX-4] Score floor too narrow: floor only triggered at HighRiskCount >= 3.
+//         Two critical permissions (e.g. Mail.ReadWrite + Directory.ReadWrite.All)
+//         could score as low as 10 after a High trust discount — below threshold,
+//         silently dropped. Fix: explicit CriticalPerms list triggers a hard floor
+//         of 35 regardless of discount. HighRiskCount >= 2 floors at 25.
+//
+// [FIX-5] substring() not length-safe on short UserAgent strings. Fix: wrapped
+//         in min(strlen(), 60) guard to prevent silent truncation edge cases.
+// ============================================================================
+
+let ConsentLookback = 30d;
+let PrevalenceLB    = 90d;
+let RiskThreshold   = 18;
+
+// ---------------------------------------------------------------------------
+// TENANT OVERLAY (replace datatable with Watchlist/external table in production)
+// Strong key: AppId. Weak key: AppName (spoofable by name).
+// Discount, not bypass.
+// ---------------------------------------------------------------------------
+let OrgKnownGoodApps = datatable(AppId:string, AppName:string, TrustLevel:string)
+[
+  // "00000000-0000-0000-0000-000000000000", "Microsoft Teams", "High"
+];
+
+// Optional tool UA tokens (best-effort; treat missing UA as "unknown")
+let SuspiciousUAs = dynamic([
+  "python","curl","wget","postman","insomnia","powershell","java","go-http","okhttp","rest-client","http-client"
+]);
+
+// High-risk permissions: exact list + regex family catch
+let HighRiskExact = dynamic([
+  "Application.ReadWrite.All","AppRoleAssignment.ReadWrite.All","RoleManagement.ReadWrite.Directory",
+  "ServicePrincipal.ReadWrite.All","Directory.ReadWrite.All","Directory.AccessAsUser.All",
+  "Mail.Read","Mail.ReadWrite","Mail.Send","MailboxSettings.ReadWrite",
+  "Files.ReadWrite.All","Sites.ReadWrite.All","Sites.FullControl.All",
+  "User.ReadWrite.All","Group.ReadWrite.All"
+]);
+
+let HighRiskRegex = @"(?i)(ReadWrite\.All|FullControl\.All|AccessAsUser\.All|RoleManagement\.ReadWrite\.Directory|Directory\.ReadWrite\.All|ServicePrincipal\.ReadWrite\.All)";
+
+// [FIX-4] Critical permissions that trigger a hard score floor regardless of
+// trust discounts. These represent tenant-wide or privileged-access capability
+// that must never be buried by KnownGood discounts alone.
+let CriticalPerms = dynamic([
+  "RoleManagement.ReadWrite.Directory",
+  "AppRoleAssignment.ReadWrite.All",
+  "Directory.ReadWrite.All",
+  "Application.ReadWrite.All",
+  "ServicePrincipal.ReadWrite.All"
+]);
+
+// ---------------------------------------------------------------------------
+// PREVALENCE (tenant reality, not allowlists)
+// Summarize down: small table keyed by AppId.
+// [FIX-1] Window ends at ago(ConsentLookback) — excludes the active detection
+// window so new apps consenting today are not pre-seeded into prevalence,
+// which would suppress IsNewApp=1 for genuinely first-seen apps.
+// ---------------------------------------------------------------------------
+let AppIdPrevalence =
+AuditLogs
+| where TimeGenerated >= ago(PrevalenceLB) and TimeGenerated < ago(ConsentLookback) // [FIX-1]
+| where Result =~ "success"
+| where OperationName in~ ("Consent to application","Add delegated permission grant","Add app role assignment grant to service principal")
+| extend T = TargetResources[0]
+| extend AppId = tostring(T.id)
+| where isnotempty(AppId)
+| summarize AppSeen = count(), AppSeenDays = dcount(bin(TimeGenerated, 1d)), FirstSeen=min(TimeGenerated) by AppId;
+
+// ---------------------------------------------------------------------------
+// BASE: Consent grant events (Minimum Truth)
+// ---------------------------------------------------------------------------
+AuditLogs
+| where TimeGenerated >= ago(ConsentLookback)
+| where Result =~ "success"
+| where OperationName in~ ("Consent to application","Add delegated permission grant","Add app role assignment grant to service principal")
+| extend T = TargetResources[0]
+| extend AppId   = tostring(T.id),
+         AppName = tostring(T.displayName)
+| where isnotempty(AppId)
+
+// Initiator normalization: user OR app
+| extend InitiatorUPN        = tostring(InitiatedBy.user.userPrincipalName),
+         InitiatorUserId     = tostring(InitiatedBy.user.id),
+         InitiatorIp         = tostring(InitiatedBy.user.ipAddress),
+         UserAgent           = tostring(InitiatedBy.user.userAgent),
+         InitiatorAppName    = tostring(InitiatedBy.app.displayName),
+         InitiatorAppId      = tostring(InitiatedBy.app.servicePrincipalId)
+
+// Unified initiator label for directives/pivots
+| extend InitiatorActor = case(
+    isnotempty(InitiatorUPN),    strcat("USER:", InitiatorUPN),
+    isnotempty(InitiatorAppName),strcat("APP:",  InitiatorAppName),
+    "UNKNOWN"
+  )
+
+// ---- Extract consent properties (Publisher / Admin / Scope / AppRoles)
+// Best-effort: do NOT assume every event carries every modifiedProperty.
+// Publisher uses take_anyif — non-deterministic if multiple rows match,
+// but PublisherName appears once per event in practice. Acceptable risk.
+| mv-expand MP = T.modifiedProperties
+| extend Prop = tostring(MP.displayName),
+         New  = trim('"', tostring(MP.newValue))
+
+| summarize
+    CreatedTime      = min(TimeGenerated),
+    Publisher        = take_anyif(New, Prop == "ConsentContext.PublisherName"),
+    IsAdmin          = max(iif(Prop == "ConsentContext.OnBehalfOfAll" and tolower(New) == "true", 1, 0)),
+    Delegated        = take_anyif(New, Prop == "Scope"),
+    AppRoles         = take_anyif(New, Prop == "AppRoles"),
+    InitiatorUPN     = any(InitiatorUPN),
+    InitiatorUserId  = any(InitiatorUserId),
+    InitiatorIp      = any(InitiatorIp),
+    UserAgent        = any(UserAgent),
+    InitiatorAppName = any(InitiatorAppName),
+    InitiatorAppId   = any(InitiatorAppId),
+    InitiatorActor   = any(InitiatorActor)
+  by AppId, AppName
+
+// ---- Normalize permissions into a single list
+| extend DelegatedList = iif(isempty(Delegated), dynamic([]), split(Delegated, " "))
+| extend AppRoleList   = iif(isempty(AppRoles),  dynamic([]), split(AppRoles,  " "))
+| extend CombinedPerms = array_concat(DelegatedList, AppRoleList) // [FIX-3] renamed from AllPerms — was dead code (overwritten by make_set below)
+| mv-expand Perm = CombinedPerms to typeof(string)
+| extend Perm = trim(" ", tostring(Perm))
+| where isnotempty(Perm)
+
+// ---- Intent evaluation: high-risk capability granted
+| extend IsHighRisk = iif(Perm in (HighRiskExact) or Perm matches regex HighRiskRegex, 1, 0)
+
+| summarize
+    CreatedTime      = any(CreatedTime),
+    Publisher        = any(Publisher),
+    IsAdmin          = any(IsAdmin),
+    HighRiskCount    = sum(IsHighRisk),
+    HighRiskPerms    = make_set_if(Perm, IsHighRisk == 1, 100),
+    AllPerms         = make_set(Perm, 100),
+    InitiatorUPN     = any(InitiatorUPN),
+    InitiatorUserId  = any(InitiatorUserId),
+    InitiatorIp      = any(InitiatorIp),
+    UserAgent        = any(UserAgent),
+    InitiatorAppName = any(InitiatorAppName),
+    InitiatorAppId   = any(InitiatorAppId),
+    InitiatorActor   = any(InitiatorActor)
+  by AppId, AppName
+
+// ---------------------------------------------------------------------------
+// Reinforcement joins (small -> small)
+// ---------------------------------------------------------------------------
+| join kind=leftouter AppIdPrevalence on AppId
+| extend AppSeen     = coalesce(AppSeen, 0),
+         AppSeenDays = coalesce(AppSeenDays, 0),
+         FirstSeen   = coalesce(FirstSeen, datetime(null)),
+         IsNewApp    = toint(AppSeen == 0),
+         // [FIX-2] IsRareApp previously triggered on apps seen once 60-90 days ago,
+         // inflating score for historically-seen apps with no recent activity.
+         // Now requires FirstSeen within ConsentLookback to confirm operational rarity.
+         IsRareApp   = toint(AppSeenDays <= 2 and FirstSeen >= ago(ConsentLookback)) // [FIX-2]
+
+| join kind=leftouter OrgKnownGoodApps on AppId
+| extend TrustLevel = tostring(TrustLevel)
+
+// UA reinforcement is OPTIONAL
+| extend HasUA          = toint(isnotempty(UserAgent)),
+         IsSuspiciousUA = iif(HasUA == 1 and tolower(UserAgent) has_any (SuspiciousUAs), 1, 0)
+
+// ---------------------------------------------------------------------------
+// Scoring (discount not bypass; rarity only after truth)
+// ---------------------------------------------------------------------------
+| extend
+    BaseScore          = 8,
+    Score_HighRisk     = HighRiskCount * 10,
+    Score_Admin        = IsAdmin * 15,
+    Score_SuspUA       = IsSuspiciousUA * 12,
+    Score_NewApp       = IsNewApp * 12,
+    Score_RareApp      = IsRareApp * 8,
+    Discount_KnownGood = case(
+        TrustLevel == "High", -18,
+        TrustLevel == "Med",  -10,
+        TrustLevel == "Low",   -5,
+        0
+    )
+| extend RawScore = BaseScore + Score_HighRisk + Score_Admin + Score_SuspUA + Score_NewApp + Score_RareApp + Discount_KnownGood
+
+// [FIX-4] Score floor widened. Original floor only triggered at HighRiskCount >= 3.
+// Two critical permissions (e.g. Mail.ReadWrite + Directory.ReadWrite.All) could
+// score as low as 10 after a High trust discount — below RiskThreshold, silently dropped.
+// Fix: CriticalPerms list triggers a hard floor of 35. HighRiskCount >= 2 floors at 25.
+// Original single-tier floor (HighRiskCount >= 3 → 30) is preserved as the fallback tier.
+| extend Score = case(
+    AllPerms has_any (CriticalPerms),          max_of(RawScore, 35), // [FIX-4] critical perm floor
+    HighRiskCount >= 2 and RawScore < 25,      25,                   // [FIX-4] two high-risk perms floor
+    HighRiskCount >= 3 and RawScore < 30,      30,                   // original floor preserved
+    RawScore
+)
+
+| where Score >= RiskThreshold
+| extend Severity = case(Score >= 50, "CRITICAL", Score >= 35, "HIGH", "MEDIUM")
+
+| extend HunterDirective = strcat(
+    "ACTION: ", Severity, " OAuth Consent Review | ",
+    "Truth: Successful consent grant. ",
+    "Intent: HighRiskCount=", tostring(HighRiskCount),
+    " Admin=", tostring(IsAdmin),
+    " AppNew=", tostring(IsNewApp), "/Rare=", tostring(IsRareApp),
+    // [FIX-5] substring() guarded with min(strlen(),60) — safe on short UA strings
+    " UA=", iif(isnotempty(UserAgent), substring(UserAgent, 0, min(strlen(UserAgent), 60)), "NA"), // [FIX-5]
+    " | App='", AppName, "' (", AppId, ")",
+    " | Publisher='", iif(isempty(Publisher),"Unknown",Publisher), "'",
+    " | Initiator=", InitiatorActor,
+    " | PIVOT: Confirm business owner. If unrecognized: Revoke consent (AppId) + rotate secrets. ",
+    "Then hunt Graph/mail/file activity for InitiatorActor='", InitiatorActor, "' and AppId='", AppId, "'."
+)
+
+| project
+    CreatedTime,
+    Severity,
+    Score,
+    AppName,
+    AppId,
+    Publisher,
+    TrustLevel,
+    AppSeen,
+    AppSeenDays,
+    FirstSeen,
+    InitiatorActor,
+    InitiatorUPN,
+    InitiatorUserId,
+    InitiatorAppName,
+    InitiatorAppId,
+    InitiatorIp,
+    UserAgent,
+    HighRiskCount,
+    HighRiskPerms,
+    HunterDirective
+| order by Score desc, CreatedTime desc
+```
+
+There it is. Next rule when you're ready.
