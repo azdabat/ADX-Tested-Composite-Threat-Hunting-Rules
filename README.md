@@ -35,7 +35,36 @@ This work (including all KQL queries, detection logic, documentation, and the "M
 > * **The Goal:** As anyone who has been in the trenches knows: engineering freedom is only found when architecture becomes simple, reductive, and easy to understand.
 > 
 > **This is "Detection-As-Code" in its purest form.** (Fully automated CI/CD pipeline section currently under development)
+>
 
+# ENGINEERING_NOTES.md
+
+## Detection Engineering Implementation Notes
+
+During validation of the **Minimum Truth Detection Framework** composite rule set, several recurring implementation pitfalls were identified while reviewing and stress-testing multiple KQL detections.
+
+These issues do **not affect the detection doctrine itself** (*Minimum Truth → Reinforcement → Scoring → Hunter Directive*), but instead arise from common **KQL engineering edge cases**, including:
+
+- Prevalence window overlap
+- Incorrect `leftouter` join handling
+- SHA256 rarity edge cases
+- Non-deterministic `any()` summarization
+- Negative composite score behavior
+
+To ensure these problems are not repeated across future detection rules, the findings were documented in a dedicated engineering reference.
+
+Engineers extending or modifying this framework should review the following document:
+
+**[KQL Detection Engineering — Common Implementation Errors](https://github.com/azdabat/Minimum-Truth-Detection-Framework-ADX-Validated-Composite-Rules/blob/main/KQL%20Detection%20Engineering%20%E2%80%94%20Common%20Implementation%20Errors.md)**
+
+This document acts as an **engineering reference and lint guide** for KQL detection development, capturing the bug classes discovered during composite rule validation.
+
+Its purpose is to ensure the framework remains **deterministic, reliable, and production-safe** as additional detection logic is developed.
+
+---
+
+*Framework: Minimum Truth Detection Framework*  
+*Author: Ala Dabat*
 # Threat Hunting Philosophy & Detection Design
 
 **Author:** Ala Dabat - This is a framework and a methadology I myself have created from hard earned trial and error. </br>
