@@ -1,0 +1,167 @@
+// ============================================================================
+// COMPOSITE HUNT (COREPLUS / L2.5): Ingress Tool Transfer — PowerShell Download Cradle
+// AUTHOR: Ala Dabat
+// STATUS: PRODUCTION HARDENED (tenant tuning expected)
+// MITRE: TA0002 (Execution) + TA0011 (C2) | T1105 (Ingress Tool Transfer)
+//
+// FIXES APPLIED:
+// [FIX-1] HIGH   — Double summarize used any() for pass-through columns causing
+//                  non-deterministic field mismatches between Cmd, scoring flags,
+//                  and evidence. Replaced with arg_max(Timestamp, *) to lock all
+//                  columns to a single consistent row.
+// [FIX-2] MEDIUM — make_set(iff(IsMatch, value, "")) included empty strings in output
+//                  sets, polluting analyst-facing evidence fields. Replaced with
+//                  make_set_if(value, IsMatch) to exclude non-matching rows cleanly.
+// [FIX-3] MEDIUM — iff(LongEncoded, 1, 0) used implicit int truthiness. Replaced with
+//                  iff(LongEncoded == 1, 1, 0) for explicit type-safe evaluation.
+// [FIX-4] LOW    — substring(Cmd, 0, 240) not length-safe on short strings.
+//                  Wrapped with min(strlen(Cmd), 240) guard.
+// ============================================================================
+
+let lookback       = 7d;
+let Threshold      = 70;
+let NearWindowMins = 10;
+
+let ShellProcs        = dynamic(["powershell.exe","pwsh.exe"]);
+let SuspiciousParents = dynamic(["winword.exe","excel.exe","powerpnt.exe","outlook.exe",
+                                  "wscript.exe","cscript.exe","mshta.exe"]);
+let WritablePathHints = dynamic(["\\users\\public\\","\\programdata\\","\\windows\\temp\\",
+                                  "\\temp\\","\\downloads\\","\\appdata\\local\\temp\\",
+                                  "\\appdata\\roaming\\"]);
+let SuspTargetExts    = dynamic([".ps1",".vbs",".vbe",".js",".jse",".sct",".hta",".dll",
+                                  ".exe",".msi",".zip",".7z",".rar",".iso",".img",
+                                  ".cab",".dat",".bin"]);
+let AllowStrings      = dynamic(["ccmcache","amazonssmagent","azureadconnect"]);
+
+// -----------------------------------------------------------------------
+// 1) BASELINE TRUTH — PowerShell with external URL + download intent
+// -----------------------------------------------------------------------
+let Base =
+DeviceProcessEvents
+| where Timestamp >= ago(lookback)
+| where FileName in~ (ShellProcs)
+| extend Cmd    = tolower(tostring(ProcessCommandLine)),
+         Parent = tolower(tostring(InitiatingProcessFileName))
+| where not(Cmd has_any (AllowStrings))
+| where not(Cmd matches regex @"(?i)://(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.|.*\.corp\.|.*\.local|.*\.internal)")
+| extend
+    HasExternalUrl   = Cmd matches regex @"(?i)http[s]?://",
+    HasIngressIntent = Cmd has_any ("invoke-webrequest"," iwr","invoke-restmethod"," irm",
+                                    "downloadstring","downloadfile","new-object net.webclient",
+                                    "system.net.webclient"),
+    HasExecIntent    = Cmd has_any ("iex","invoke-expression","-enc","frombase64string"),
+    BadParent        = Parent in~ (SuspiciousParents),
+    TargetsWritable  = Cmd has_any (WritablePathHints),
+    TargetsSuspExt   = Cmd has_any (SuspTargetExts),
+    LongEncoded      = toint(Cmd matches regex @"(?i)\s-enc(odedcommand)?\s+[A-Za-z0-9+/=]{400,}")
+| where HasExternalUrl and HasIngressIntent
+| project Timestamp, DeviceId, DeviceName, AccountName,
+          FileName, ProcessId, InitiatingProcessId,
+          Parent, Cmd,
+          HasExecIntent, BadParent, TargetsWritable, TargetsSuspExt, LongEncoded;
+
+// -----------------------------------------------------------------------
+// 2) File writes by PS (payload staging reinforcement)
+// -----------------------------------------------------------------------
+let FileArtifacts =
+DeviceFileEvents
+| where Timestamp >= ago(lookback)
+| where ActionType in ("FileCreated","FileRenamed","FileModified")
+| extend Path     = tolower(tostring(FolderPath)),
+         FullPath = strcat(tolower(tostring(FolderPath)), "\\", tolower(tostring(FileName)))
+| where Path has_any (WritablePathHints) or FullPath has_any (SuspTargetExts)
+| project DeviceId, WriterProcessId=InitiatingProcessId,
+          FileTime=Timestamp, DroppedFile=FullPath;
+
+// -----------------------------------------------------------------------
+// 3) Child cascade from PS (download → execute reinforcement)
+// -----------------------------------------------------------------------
+let ChildCascade =
+DeviceProcessEvents
+| where Timestamp >= ago(lookback)
+| extend ChildProc = tolower(tostring(FileName))
+| where ChildProc !in~ ("conhost.exe","werfault.exe")
+| project DeviceId, ParentProcessId=InitiatingProcessId,
+          ChildTime=Timestamp, ChildProc,
+          ChildCmd=tostring(ProcessCommandLine);
+
+// -----------------------------------------------------------------------
+// 4) Correlate — File artifacts
+// [FIX-1] arg_max(Timestamp, *) replaces individual any() calls
+// [FIX-2] make_set_if replaces make_set(iff(..., "", ...))
+// -----------------------------------------------------------------------
+Base
+| join kind=leftouter (FileArtifacts) on DeviceId
+| extend IsFileMatch = (WriterProcessId == ProcessId
+                        and abs(datetime_diff("minute", Timestamp, FileTime)) <= NearWindowMins)
+| summarize
+    FileNear     = max(toint(IsFileMatch)),
+    DroppedFiles = make_set_if(DroppedFile, IsFileMatch, 10),  // [FIX-2]
+    arg_max(Timestamp, *)                                       // [FIX-1]
+  by DeviceId, ProcessId, InitiatingProcessId
+
+// -----------------------------------------------------------------------
+// 5) Correlate — Child cascade
+// [FIX-1] arg_max(Timestamp, *) replaces individual any() calls
+// [FIX-2] make_set_if replaces make_set(iff(..., "", ...))
+// -----------------------------------------------------------------------
+| join kind=leftouter (ChildCascade) on DeviceId
+| extend IsChildMatch = (ParentProcessId == ProcessId
+                         and abs(datetime_diff("minute", Timestamp, ChildTime)) <= NearWindowMins)
+| summarize
+    ChildNear    = max(toint(IsChildMatch)),
+    ChildProcs   = make_set_if(ChildProc, IsChildMatch, 10),  // [FIX-2]
+    FileNear     = max(FileNear),
+    DroppedFiles = any(DroppedFiles),
+    arg_max(Timestamp, *)                                      // [FIX-1]
+  by DeviceId, ProcessId, InitiatingProcessId
+
+// -----------------------------------------------------------------------
+// 6) Score
+// [FIX-3] Explicit == 1 comparisons for int-typed boolean fields
+// -----------------------------------------------------------------------
+| extend
+    BaseScore     = 45,
+    ContextScore  =
+        (30 * iff(HasExecIntent,              1, 0)) +
+        (25 * iff(BadParent,                  1, 0)) +
+        (10 * iff(TargetsWritable,            1, 0)) +
+        (10 * iff(TargetsSuspExt,             1, 0)) +
+        (8  * iff(LongEncoded == 1,           1, 0)),  // [FIX-3]
+    ReinforceScore =
+        (25 * iff(FileNear  == 1,             1, 0)) +
+        (25 * iff(ChildNear == 1,             1, 0)),
+    RiskScore = tolong(BaseScore + ContextScore + ReinforceScore),
+    Severity  = case(
+        RiskScore >= 95, "CRITICAL",
+        RiskScore >= 80, "HIGH",
+                         "MEDIUM"
+    )
+| where RiskScore >= Threshold
+
+// -----------------------------------------------------------------------
+// 7) Output
+// [FIX-4] substring length-safe guard
+// -----------------------------------------------------------------------
+| extend HuntingDirectives = pack_array(
+    strcat("[MIN_TRUTH] ", FileName, " executed with external transfer intent."),
+    strcat("[SCORE] ", tostring(RiskScore), " | Severity=", Severity,
+           " | ExecIntent=", tostring(HasExecIntent),
+           " | FileNear=",   tostring(FileNear),
+           " | ChildNear=",  tostring(ChildNear)),
+    strcat("[CMD] ", substring(Cmd, 0, min(strlen(Cmd), 240))),  // [FIX-4]
+    iif(FileNear  == 1,
+        strcat("[FILE] Near artifact(s) written by PS: ",    tostring(DroppedFiles)),
+        "[FILE] No near writable/suspicious artifacts."),
+    iif(ChildNear == 1,
+        strcat("[CASCADE] Near child proc(s) spawned by PS: ", tostring(ChildProcs)),
+        "[CASCADE] No near child execution observed."),
+    "[NEXT] Extract URL(s), decode if -enc/base64, validate dropped artifacts, review child lineage, scope command pattern across fleet."
+)
+| project
+    Timestamp, DeviceName, AccountName, FileName,
+    RiskScore, Severity, Parent, Cmd,
+    FileNear, DroppedFiles,
+    ChildNear, ChildProcs,
+    HuntingDirectives
+| order by RiskScore desc, Timestamp
