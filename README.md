@@ -147,7 +147,8 @@ That is the substrate. Nothing more.
 - Broad coverage  
 - Requires reinforcement to gain confidence  
 - Suitable for L1 / atomic sensor logic  
-- Ideal for correlation-driven architectures  
+- Ideal for correlation-driven architectures
+- WMI Fileless attacks are a PRIME example of when subsrate first is the requirment.
 
 ---
 
