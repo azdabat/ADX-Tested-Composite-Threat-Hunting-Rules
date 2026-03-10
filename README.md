@@ -63,8 +63,19 @@ Its purpose is to ensure the framework remains **deterministic, reliable, and pr
 
 ---
 
+## ATT&CK Substrate Adjacency — Detection Coverage Beyond Technique Taxonomy
+
+[**ATT&CK Substrate Adjacency — Detection Coverage Beyond Technique Taxonomy**](https://github.com/azdabat/Minimum-Truth-Detection-Framework-ADX-Validated-Composite-Rules/blob/main/ATT%26CK_Substrate_Adjacency.md)
+
+MITRE ATT&CK provides a taxonomy of adversary techniques, describing **what attackers do** during an intrusion. However, ATT&CK primarily models techniques as independent units with vertical depth (technique → sub-technique). What it does not model is **substrate adjacency** — the reality that many ATT&CK techniques represent the same adversary intent executed across different operating system substrates.
+
+For example, lateral movement techniques such as **SMB (T1021.002), DCOM (T1021.003), and WinRM (T1021.006)** are often operationally interchangeable for attackers. An adversary may pivot dynamically between them depending on firewall restrictions, privileges, or endpoint controls. Treating these techniques as independent can create a **false sense of detection coverage**.
+
+The Minimum Truth Detection Framework introduces a **Cousin Technique Doctrine**, which models these adjacent techniques as part of a shared **attack ecosystem**. This layer sits on top of ATT&CK and helps detection engineers reason about **coverage gaps between related substrates**, enabling detection strategies that target adversary intent rather than isolated technique identifiers.
+
+---
+
 *Framework: Minimum Truth Detection Framework*  
-*Author: Ala Dabat*
 # Threat Hunting Philosophy & Detection Design
 
 **Author:** Ala Dabat - This is a framework and a methadology I myself have created from hard earned trial and error. </br>
