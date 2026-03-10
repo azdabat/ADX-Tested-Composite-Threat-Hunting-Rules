@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Minimum Truth Detection Framework — MITRE Matrix</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;800&display=swap');
+
+  :root {
+    --bg: #0d0f14;
+    --surface: #13161e;
+    --surface2: #1a1e29;
+    --border: #2a2f3d;
+    --accent: #00d4ff;
+    --accent2: #7c3aed;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --core: #f59e0b;
+
+    /* Tactic colors */
+    --c2: #ef4444;
+    --persist: #f97316;
+    --lateral: #eab308;
+    --cred: #22c55e;
+    --discovery: #06b6d4;
+    --exec: #a855f7;
+    --evasion: #ec4899;
+    --impact: #f43f5e;
+    --identity: #10b981;
+    --control: #6366f1;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  header {
+    padding: 40px 32px 24px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #0d0f14 0%, #13161e 100%);
+  }
+
+  header h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    color: var(--accent);
+    margin-bottom: 4px;
+  }
+
+  header p {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  header .meta {
+    display: flex;
+    gap: 24px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+
+  header .meta span {
+    font-size: 11px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    padding: 3px 10px;
+    border-radius: 4px;
+  }
+
+  header .meta span b {
+    color: var(--text);
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 0 32px;
+    background: var(--surface);
+  }
+
+  .tab {
+    padding: 12px 20px;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 12px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 600;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+    letter-spacing: 0.3px;
+  }
+
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .panel { display: none; padding: 32px; }
+  .panel.active { display: block; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+  }
+
+  .core-indicator {
+    display: inline-block;
+    background: var(--core);
+    color: #000;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    letter-spacing: 0.5px;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  th {
+    text-align: left;
+    padding: 10px 14px;
+    background: var(--surface2);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  tr:hover td { background: var(--surface2); }
+
+  .tactic-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+
+  .ecosystem-name {
+    font-family: 'Syne', sans-serif;
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+
+  .rule-list {
+    list-style: none;
+    margin-top: 4px;
+  }
+
+  .rule-list li {
+    padding: 2px 0;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .rule-list li.core {
+    color: var(--core);
+    font-weight: 600;
+  }
+
+  .rule-list li.core::before {
+    content: '★ ';
+    font-size: 10px;
+  }
+
+  .rule-list li::before {
+    content: '· ';
+    color: var(--border);
+  }
+
+  .technique {
+    display: inline-block;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--accent);
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin: 2px 2px 2px 0;
+    white-space: nowrap;
+  }
+
+  .missing-tag {
+    display: inline-block;
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    color: #ef4444;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin: 2px 2px 2px 0;
+  }
+
+  .cousin-tag {
+    display: inline-block;
+    background: rgba(124,58,237,0.1);
+    border: 1px solid rgba(124,58,237,0.3);
+    color: #a78bfa;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin: 2px 2px 2px 0;
+  }
+
+  .section-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--text);
+    margin-bottom: 8px;
+    margin-top: 32px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .section-title:first-child { margin-top: 0; }
+
+  .callout {
+    background: var(--surface2);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    margin-bottom: 24px;
+    border-radius: 0 4px 4px 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .callout b { color: var(--text); }
+
+  .missing-section {
+    background: rgba(239,68,68,0.05);
+    border: 1px solid rgba(239,68,68,0.2);
+    border-radius: 6px;
+    padding: 16px;
+    margin-top: 16px;
+  }
+
+  .missing-section h3 {
+    font-family: 'Syne', sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    color: #ef4444;
+    margin-bottom: 12px;
+    letter-spacing: 0.5px;
+  }
+
+  .missing-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 8px;
+  }
+
+  .missing-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 12px;
+  }
+
+  .missing-item .title {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 11px;
+    margin-bottom: 2px;
+  }
+
+  .missing-item .desc {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .hc-priority {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 700;
+    margin-left: 6px;
+  }
+
+  .p1 { background: rgba(239,68,68,0.2); color: #ef4444; }
+  .p2 { background: rgba(245,158,11,0.2); color: #f59e0b; }
+  .p3 { background: rgba(34,197,94,0.2); color: #22c55e; }
+
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 24px 0;
+  }
+
+  @media (max-width: 768px) {
+    .panel { padding: 16px; }
+    header { padding: 20px 16px; }
+    .tabs { padding: 0 16px; }
+    table { font-size: 11px; }
+    th, td { padding: 8px 10px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Minimum Truth Detection Framework</h1>
+  <p>MITRE ATT&CK Ecosystem Matrix — ADX Validated Composite Rules</p>
+  <div class="meta">
+    <span>Author: <b>Ala Dabat</b></span>
+    <span>Licence: <b>CC BY-NC-SA 4.0</b></span>
+    <span>Ecosystems: <b>8</b></span>
+    <span>Rules: <b>60+</b></span>
+    <span>★ = Core Rule</span>
+  </div>
+</header>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('full')">Full Matrix</div>
+  <div class="tab" onclick="showTab('healthcare')">Healthcare Sub-Matrix</div>
+  <div class="tab" onclick="showTab('missing')">Missing Coverage</div>
+</div>
+
+<!-- FULL MATRIX TAB -->
+<div id="full" class="panel active">
+
+  <div class="callout">
+    <b>Framework doctrine:</b> Each rule is a sensor, not a kill-chain monolith. Core rules (★) are the minimum truth anchor for each ecosystem. Adjacent cousin rules extend coverage across the same attack intent using different vectors. No ghost chains — sensor layer is always separated from narrative layer.
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--c2)"></div> Command & Control</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--persist)"></div> Persistence</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--lateral)"></div> Lateral Movement</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--cred)"></div> Credential Access</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--identity)"></div> Identity / Cloud</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--exec)"></div> Execution</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--evasion)"></div> Defence Evasion</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--impact)"></div> Impact</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--control)"></div> Control Plane</div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:130px">Tactic</th>
+        <th style="width:180px">Ecosystem</th>
+        <th>Core Rules ★</th>
+        <th>Cousin / Adjacent Rules</th>
+        <th style="width:220px">MITRE Techniques</th>
+      </tr>
+    </thead>
+    <tbody>
+
+      <!-- C2 -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(239,68,68,0.15);color:var(--c2)">C2</span></td>
+        <td>
+          <div class="ecosystem-name">C2 Attack Surface Ecosystem</div>
+          <div style="color:var(--muted);font-size:10px">4 rules</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">C2_HTTPS_Jitter_Beacon (v2)</li>
+            <li class="core">C2_NamedPipe_IPC_Session</li>
+            <li>C2_HTTPS_Jitter_Beacon (v1)</li>
+            <li>C2_Blockchain_RPC_Beacon</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">DNS Tunnelling C2</span>
+          <span class="cousin-tag">ICMP C2</span>
+          <span class="cousin-tag">SMB C2 Channel</span>
+          <span class="cousin-tag">Domain Fronting</span>
+          <span class="cousin-tag">FastFlux Beacon</span>
+        </td>
+        <td>
+          <span class="technique">T1071.001 Web Protocols</span>
+          <span class="technique">T1559.001 Named Pipes</span>
+          <span class="technique">T1102 Web Service</span>
+          <span class="technique">T1571 Non-Std Port</span>
+        </td>
+      </tr>
+
+      <!-- PERSISTENCE - Registry -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(249,115,22,0.15);color:var(--persist)">Persistence</span></td>
+        <td>
+          <div class="ecosystem-name">Registry Persistence Ecosystem</div>
+          <div style="color:var(--muted);font-size:10px">10+ rules</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">Registry_Persistence_Boot (primary)</li>
+            <li class="core">Registry_Payload_Stash</li>
+            <li class="core">Registry_Persistence_LSA</li>
+            <li>ADX_Registry_Persistence</li>
+            <li>Registry_Persistence_Security</li>
+            <li>Registry_Persistence_UAC</li>
+            <li>Registry_Persistence_Hive</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">TaskCache Persistence</span>
+          <span class="cousin-tag">Service ImagePath Hijack</span>
+          <span class="cousin-tag">Autoruns / Run Keys</span>
+          <span class="cousin-tag">Security Provider Hijack</span>
+          <span class="cousin-tag">COM Object Hijack</span>
+          <span class="cousin-tag">AppInit DLL</span>
+        </td>
+        <td>
+          <span class="technique">T1547.001 Run Keys</span>
+          <span class="technique">T1112 Modify Registry</span>
+          <span class="technique">T1547.005 Security Support</span>
+          <span class="technique">T1553.004 Code Signing</span>
+          <span class="technique">T1548.002 UAC Bypass</span>
+          <span class="technique">T1027 Obfuscated Files</span>
+        </td>
+      </tr>
+
+      <!-- PERSISTENCE - LOLBins Scheduled Task -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(249,115,22,0.15);color:var(--persist)">Persistence</span></td>
+        <td>
+          <div class="ecosystem-name">LOLBins — ScheduledTask</div>
+          <div style="color:var(--muted);font-size:10px">Part of HuntPack 02</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">02_ScheduledTask_Persistence</li>
+            <li class="core">03_Persistence_Surface</li>
+            <li>Scheduled_Tasks_Abuse</li>
+            <li>Scheduled_Tasks_Rundll</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">TaskCache (silent - no schtasks.exe)</span>
+          <span class="cousin-tag">AT Job Legacy</span>
+          <span class="cousin-tag">BITS Job Persistence</span>
+          <span class="cousin-tag">Winlogon Helper</span>
+        </td>
+        <td>
+          <span class="technique">T1053.005 Scheduled Task</span>
+          <span class="technique">T1053.002 AT Job</span>
+          <span class="technique">T1197 BITS Jobs</span>
+          <span class="technique">T1547.004 Winlogon</span>
+        </td>
+      </tr>
+
+      <!-- LATERAL MOVEMENT - SMB -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(234,179,8,0.15);color:var(--lateral)">Lateral Movement</span></td>
+        <td>
+          <div class="ecosystem-name">SMB Services Attack Ecosystem</div>
+          <div style="color:var(--muted);font-size:10px">5 rules</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">SMB_Services_PsExec</li>
+            <li class="core">SMB_TaskExec_Svchosts (v2)</li>
+            <li>ADX_SMB_Svhosts_Harvester</li>
+            <li>SMB_Svhosts_Empire</li>
+            <li>SMB_TaskExec_Svchosts (v1)</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">WMI Remote Process</span>
+          <span class="cousin-tag">DCOM Lateral</span>
+          <span class="cousin-tag">RDP Hijack</span>
+          <span class="cousin-tag">WinRM Exec</span>
+          <span class="cousin-tag">Pass-the-Hash</span>
+          <span class="cousin-tag">SSH Lateral (Linux)</span>
+        </td>
+        <td>
+          <span class="technique">T1021.002 SMB/Admin Shares</span>
+          <span class="technique">T1569.002 Service Execution</span>
+          <span class="technique">T1543.003 Windows Service</span>
+          <span class="technique">T1570 Lateral Tool Transfer</span>
+          <span class="technique">T1550.002 Pass-the-Hash</span>
+        </td>
+      </tr>
+
+      <!-- LATERAL MOVEMENT - WMI -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(234,179,8,0.15);color:var(--lateral)">Lateral + Execution</span></td>
+        <td>
+          <div class="ecosystem-name">WMI Ecosystem Validation</div>
+          <div style="color:var(--muted);font-size:10px">12+ rules</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">WMI_FILELESS_ATTACK</li>
+            <li class="core">WMI_Permanent_Subscription</li>
+            <li class="core">WmiPrvSE_Secondary</li>
+            <li>WMI_Fileless_Consumer</li>
+            <li>WMI_Fileless_Scrcons</li>
+            <li>WMI_ADX_FIRST_PASS</li>
+            <li>WMI-L2_Remote_Process</li>
+            <li>WMI-L2_Fileless_Consumer</li>
+            <li>WMI_Fileless_Execution</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">DCOM via WMI</span>
+          <span class="cousin-tag">WMI Provider Host Masq.</span>
+          <span class="cousin-tag">MOF File Abuse</span>
+          <span class="cousin-tag">WMI via PowerShell Remoting</span>
+        </td>
+        <td>
+          <span class="technique">T1047 WMI</span>
+          <span class="technique">T1546.003 WMI Event Sub</span>
+          <span class="technique">T1059.001 PowerShell</span>
+          <span class="technique">T1021.003 DCOM</span>
+          <span class="technique">T1055 Process Injection</span>
+        </td>
+      </tr>
+
+      <!-- CREDENTIAL ACCESS -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(34,197,94,0.15);color:var(--cred)">Cred Access</span></td>
+        <td>
+          <div class="ecosystem-name">Credential Access Ecosystem</div>
+          <div style="color:var(--muted);font-size:10px">LSASS + NTDS + Secrets</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">COMPOSITE_L3_LSASS</li>
+            <li class="core">L2_Composite_NTDS_Dit (primary)</li>
+            <li class="core">SecretsRecon_Hunt</li>
+            <li>Composite_LSASS_Credential (x3 variants)</li>
+            <li>Cousin_Discovery_Logon</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">Kerberoasting</span>
+          <span class="cousin-tag">AS-REP Roasting</span>
+          <span class="cousin-tag">DCSync</span>
+          <span class="cousin-tag">SAM Hive Dump</span>
+          <span class="cousin-tag">Credential Manager Access</span>
+          <span class="cousin-tag">LSASS Process Access (non-dump)</span>
+        </td>
+        <td>
+          <span class="technique">T1003.001 LSASS Memory</span>
+          <span class="technique">T1003.003 NTDS</span>
+          <span class="technique">T1552 Unsecured Creds</span>
+          <span class="technique">T1558.003 Kerberoasting</span>
+          <span class="technique">T1003.002 SAM</span>
+          <span class="technique">T1087 Account Discovery</span>
+        </td>
+      </tr>
+
+      <!-- IDENTITY / OAUTH -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(16,185,129,0.15);color:var(--identity)">Identity / Cloud</span></td>
+        <td>
+          <div class="ecosystem-name">OAuth / Token Abuse Ecosystem</div>
+          <div style="color:var(--muted);font-size:10px">6 rules + doctrine</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">OAuth_Consent_Abuse (primary)</li>
+            <li class="core">OAuth_Token_Theft</li>
+            <li class="core">Service_Principal_Backdoor</li>
+            <li>0Auth_Consent_Abuse (v2)</li>
+            <li>OAuth_Consent_Doctrine (doc)</li>
+            <li>OAuth_Consent_Correction (doc)</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">Device Code Phishing</span>
+          <span class="cousin-tag">Refresh Token Abuse</span>
+          <span class="cousin-tag">SAML Golden Ticket</span>
+          <span class="cousin-tag">App Impersonation</span>
+          <span class="cousin-tag">Azure AD Backdoor App</span>
+          <span class="cousin-tag">Managed Identity Abuse</span>
+        </td>
+        <td>
+          <span class="technique">T1528 Steal App Access Token</span>
+          <span class="technique">T1550.001 App Access Token</span>
+          <span class="technique">T1078.004 Cloud Accounts</span>
+          <span class="technique">T1606.002 SAML Token</span>
+          <span class="technique">T1136.003 Cloud Account</span>
+        </td>
+      </tr>
+
+      <!-- EXECUTION / LOLBins -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(168,85,247,0.15);color:var(--exec)">Execution</span></td>
+        <td>
+          <div class="ecosystem-name">LOLBins Composite HuntPack</div>
+          <div style="color:var(--muted);font-size:10px">9 sub-folders</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">01_ProxyExec_Ingress</li>
+            <li class="core">08_Debug_Dump_Injection</li>
+            <li class="core">Powershell_Cradle_Ingress</li>
+            <li class="core">PowerShell_Download</li>
+            <li>04_DefenseEvasion_Renamed</li>
+            <li>05_AD_Recon_Discovery</li>
+            <li>06_Local_SecretHunting</li>
+            <li>07_RemoteExec_Lateral</li>
+            <li>1_DotNet_Toolchain_Proxy</li>
+            <li>Powershell_Cradle_Staged</li>
+            <li>Powershell_Intent_First</li>
+            <li>LOLBINS_Ingress_Pack</li>
+            <li>Ingress_Tool_Transfer</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">MSHTA Execution</span>
+          <span class="cousin-tag">Certutil Download</span>
+          <span class="cousin-tag">Regsvr32 Proxy</span>
+          <span class="cousin-tag">BitsAdmin Transfer</span>
+          <span class="cousin-tag">Wscript/Cscript Exec</span>
+          <span class="cousin-tag">Compiled HTML (CHM)</span>
+        </td>
+        <td>
+          <span class="technique">T1218 System Binary Proxy</span>
+          <span class="technique">T1059.001 PowerShell</span>
+          <span class="technique">T1105 Ingress Tool Transfer</span>
+          <span class="technique">T1036.003 Renamed Binaries</span>
+          <span class="technique">T1087.002 Domain Account</span>
+          <span class="technique">T1218.004 InstallUtil</span>
+          <span class="technique">T1055 Process Injection</span>
+        </td>
+      </tr>
+
+      <!-- IMPACT - Ransomware -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(244,63,94,0.15);color:var(--impact)">Impact</span></td>
+        <td>
+          <div class="ecosystem-name">Ransomware Cousins (Tier-2)</div>
+          <div style="color:var(--muted);font-size:10px">3 cousin rules</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">Cousin_EncryptionVelocity</li>
+            <li class="core">Cousin_ShadowDeletion</li>
+            <li class="core">Cousin_ServiceStopPlus</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">Backup Deletion (wbadmin)</span>
+          <span class="cousin-tag">Firewall Disable Pre-Encrypt</span>
+          <span class="cousin-tag">Ransom Note Drop</span>
+          <span class="cousin-tag">MBR Wipe</span>
+          <span class="cousin-tag">Network Share Encryption</span>
+        </td>
+        <td>
+          <span class="technique">T1486 Data Encrypted</span>
+          <span class="technique">T1490 Inhibit Recovery</span>
+          <span class="technique">T1489 Service Stop</span>
+          <span class="technique">T1485 Data Destruction</span>
+          <span class="technique">T1561.002 Disk Structure</span>
+        </td>
+      </tr>
+
+      <!-- CONTROL PLANE -->
+      <tr>
+        <td><span class="tactic-badge" style="background:rgba(99,102,241,0.15);color:var(--control)">Control Plane</span></td>
+        <td>
+          <div class="ecosystem-name">Control Plane Exposure</div>
+          <div style="color:var(--muted);font-size:10px">1 rule</div>
+        </td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">Rogue_and_Unmanaged_Device</li>
+          </ul>
+        </td>
+        <td>
+          <span class="cousin-tag">Unauthorised Network Device</span>
+          <span class="cousin-tag">Shadow IT Cloud Resource</span>
+          <span class="cousin-tag">Unmanaged Endpoint Enrol</span>
+        </td>
+        <td>
+          <span class="technique">T1200 Hardware Additions</span>
+          <span class="technique">T1078 Valid Accounts</span>
+          <span class="technique">T1133 External Remote Svcs</span>
+        </td>
+      </tr>
+
+    </tbody>
+  </table>
+</div>
+
+<!-- HEALTHCARE TAB -->
+<div id="healthcare" class="panel">
+
+  <div class="callout">
+    <b>Healthcare threat model:</b> The primary adversary is ransomware groups targeting EHR systems, clinical workstations, and patient data. Secondary is nation-state espionage targeting research and pharmaceutical IP. Flat hospital networks make lateral movement trivial once initial access is established. Cloud EHR adoption (Epic, Cerner) increases OAuth/identity surface dramatically.
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:120px">Priority</th>
+        <th style="width:160px">Ecosystem</th>
+        <th>Focused Rules for Healthcare</th>
+        <th>Healthcare-Specific Context</th>
+        <th style="width:200px">Key Techniques</th>
+      </tr>
+    </thead>
+    <tbody>
+
+      <tr>
+        <td><span class="hc-priority p1">P1 CRITICAL</span></td>
+        <td><div class="ecosystem-name">Ransomware Cousins</div></td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">Cousin_EncryptionVelocity</li>
+            <li class="core">Cousin_ShadowDeletion</li>
+            <li class="core">Cousin_ServiceStopPlus</li>
+          </ul>
+        </td>
+        <td style="color:var(--muted);font-size:11px">
+          Healthcare is #1 ransomware target globally. Patient safety impact (cancelled operations, diverted ambulances). EHR downtime = direct clinical risk. Shadow copy deletion is the last line before encryption. Detect here or it's too late.
+        </td>
+        <td>
+          <span class="technique">T1486</span>
+          <span class="technique">T1490</span>
+          <span class="technique">T1489</span>
+        </td>
+      </tr>
+
+      <tr>
+        <td><span class="hc-priority p1">P1 CRITICAL</span></td>
+        <td><div class="ecosystem-name">Credential Access</div></td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">COMPOSITE_L3_LSASS</li>
+            <li class="core">L2_Composite_NTDS_Dit</li>
+            <li class="core">SecretsRecon_Hunt</li>
+            <li>Cousin_Discovery_Logon</li>
+          </ul>
+        </td>
+        <td style="color:var(--muted);font-size:11px">
+          Clinical staff share credentials on shared terminals. LSASS dump on a clinical workstation = immediate domain escalation. NTDS dump = entire trust model gone. Healthcare AD forests are often under-hardened with legacy systems preventing Credential Guard.
+        </td>
+        <td>
+          <span class="technique">T1003.001</span>
+          <span class="technique">T1003.003</span>
+          <span class="technique">T1552</span>
+        </td>
+      </tr>
+
+      <tr>
+        <td><span class="hc-priority p1">P1 CRITICAL</span></td>
+        <td><div class="ecosystem-name">SMB Lateral Movement</div></td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">SMB_Services_PsExec</li>
+            <li class="core">SMB_TaskExec_Svchosts</li>
+            <li>ADX_SMB_Svhosts_Harvester</li>
+          </ul>
+        </td>
+        <td style="color:var(--muted);font-size:11px">
+          Hospital networks are notoriously flat. Clinical systems, PACS servers, infusion pumps, and domain controllers often share the same network segment. SMB lateral movement from one clinical workstation can reach imaging, pharmacy, and theatre systems within minutes.
+        </td>
+        <td>
+          <span class="technique">T1021.002</span>
+          <span class="technique">T1569.002</span>
+          <span class="technique">T1543.003</span>
+        </td>
+      </tr>
+
+      <tr>
+        <td><span class="hc-priority p2">P2 HIGH</span></td>
+        <td><div class="ecosystem-name">OAuth / Identity</div></td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">OAuth_Consent_Abuse</li>
+            <li class="core">OAuth_Token_Theft</li>
+            <li class="core">Service_Principal_Backdoor</li>
+          </ul>
+        </td>
+        <td style="color:var(--muted);font-size:11px">
+          Cloud EHR migration (Epic on Azure, Cerner cloud) dramatically expanded OAuth attack surface. Clinician M365 accounts have access to patient data. Consent abuse can grant persistent access to patient records without touching endpoints. Service principal backdoors survive credential resets.
+        </td>
+        <td>
+          <span class="technique">T1528</span>
+          <span class="technique">T1550.001</span>
+          <span class="technique">T1078.004</span>
+        </td>
+      </tr>
+
+      <tr>
+        <td><span class="hc-priority p2">P2 HIGH</span></td>
+        <td><div class="ecosystem-name">WMI Ecosystem</div></td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">WMI_FILELESS_ATTACK</li>
+            <li class="core">WMI_Permanent_Subscription</li>
+            <li class="core">WmiPrvSE_Secondary</li>
+          </ul>
+        </td>
+        <td style="color:var(--muted);font-size:11px">
+          WMI permanent event subscriptions are the preferred persistence method in healthcare environments because AV coverage is often limited to signature detection. Clinical workstations run Windows 7-10 with minimal EDR. WMI fileless survives reimaging if the subscription survives.
+        </td>
+        <td>
+          <span class="technique">T1047</span>
+          <span class="technique">T1546.003</span>
+          <span class="technique">T1059.001</span>
+        </td>
+      </tr>
+
+      <tr>
+        <td><span class="hc-priority p2">P2 HIGH</span></td>
+        <td><div class="ecosystem-name">C2 Ecosystem</div></td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">C2_HTTPS_Jitter_Beacon (v2)</li>
+            <li class="core">C2_NamedPipe_IPC_Session</li>
+          </ul>
+        </td>
+        <td style="color:var(--muted);font-size:11px">
+          Healthcare attackers maintain long dwell times — average 200+ days before ransomware deployment. HTTPS beaconing blends with legitimate EHR traffic to cloud vendors. Named pipe C2 (Cobalt Strike) is the preferred post-exploitation channel in healthcare breaches. Jitter detection is essential against modern C2 frameworks.
+        </td>
+        <td>
+          <span class="technique">T1071.001</span>
+          <span class="technique">T1559.001</span>
+          <span class="technique">T1102</span>
+        </td>
+      </tr>
+
+      <tr>
+        <td><span class="hc-priority p3">P3 MEDIUM</span></td>
+        <td><div class="ecosystem-name">LOLBins HuntPack</div></td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">01_ProxyExec_Ingress</li>
+            <li class="core">Powershell_Cradle_Ingress</li>
+            <li>PowerShell_Download</li>
+            <li>LOLBINS_Ingress_Pack</li>
+          </ul>
+        </td>
+        <td style="color:var(--muted);font-size:11px">
+          Clinical workstations run legacy software requiring LOLBin execution for legitimate tasks — making LOLBin detection harder. Focus on ingress and cradle detection over execution detection to avoid false positive flood. Healthcare IT teams use PowerShell extensively for patch management.
+        </td>
+        <td>
+          <span class="technique">T1218</span>
+          <span class="technique">T1059.001</span>
+          <span class="technique">T1105</span>
+        </td>
+      </tr>
+
+      <tr>
+        <td><span class="hc-priority p3">P3 MEDIUM</span></td>
+        <td><div class="ecosystem-name">Registry Persistence</div></td>
+        <td>
+          <ul class="rule-list">
+            <li class="core">Registry_Persistence_LSA</li>
+            <li class="core">Registry_Payload_Stash</li>
+            <li>Registry_Persistence_Boot (primary)</li>
+          </ul>
+        </td>
+        <td style="color:var(--muted);font-size:11px">
+          LSA Security Provider hijack is particularly dangerous in healthcare as it intercepts all authentication events. Payload stash in registry blobs survives AV scanning. Clinical workstation reimaging cycles are long — persistence has time to establish.
+        </td>
+        <td>
+          <span class="technique">T1547.001</span>
+          <span class="technique">T1547.005</span>
+          <span class="technique">T1027</span>
+        </td>
+      </tr>
+
+    </tbody>
+  </table>
+
+  <div class="section-title" style="margin-top:32px">Healthcare-Specific Missing Coverage</div>
+
+  <div class="missing-grid">
+    <div class="missing-item">
+      <div class="title">PHI Exfiltration Detection <span class="hc-priority p1">P1</span></div>
+      <div class="desc">No dedicated staging + archive + large outbound transfer chain. Patient data exfil before ransomware is now standard (double extortion). Need: file archive creation → staging folder → outbound transfer composite.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">RDP Clinical Workstation Abuse <span class="hc-priority p1">P1</span></div>
+      <div class="desc">No RDP lateral movement ecosystem. Hospital environments run extensive RDP for remote clinical support. RDP is the #1 initial access vector in healthcare. Need: T1021.001 ecosystem with session hijack cousin rules.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Backup System Targeting <span class="hc-priority p1">P1</span></div>
+      <div class="desc">Shadow deletion cousin exists but no dedicated backup software process kill (Veeam, Backup Exec, Windows Server Backup). Pre-ransomware backup destruction is systematic. Need dedicated T1490 composite.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">VPN / Remote Access Abuse <span class="hc-priority p2">P2</span></div>
+      <div class="desc">Post-COVID remote clinical access explosion. No detection for impossible travel, concurrent VPN sessions, off-hours VPN from unusual geos. T1133 External Remote Services gap.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Medical Device Network Pivot <span class="hc-priority p2">P2</span></div>
+      <div class="desc">IoMT (infusion pumps, imaging, monitoring equipment) runs unpatched firmware on flat networks. No detection for pivot from medical device subnet to clinical workstation domain. Unique to healthcare.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">HL7 / FHIR API Abuse <span class="hc-priority p2">P2</span></div>
+      <div class="desc">Cloud EHR APIs (Epic FHIR R4, Cerner Millennium) are OAuth protected but bulk patient data access through legitimate API tokens is undetected. Need anomaly detection on API query volume and data scope.</div>
+    </div>
+  </div>
+</div>
+
+<!-- MISSING COVERAGE TAB -->
+<div id="missing" class="panel">
+
+  <div class="callout">
+    <b>Coverage gap philosophy:</b> Missing rules are identified by ecosystem shape, not MITRE square count. A gap exists where the attack intent is covered on one vector but the cousin surfaces are not mapped. These are the paths an adversary pivots to when the primary detection fires.
+  </div>
+
+  <div class="section-title">Priority 1 — Missing Entire Ecosystems</div>
+
+  <div class="missing-grid">
+    <div class="missing-item">
+      <div class="title">Exfiltration Ecosystem</div>
+      <div class="desc">No dedicated exfiltration detection. Data staging → archive creation → outbound transfer composite is absent. T1041, T1048, T1567. Critical for financial and healthcare. This is the ecosystem where the damage is actually measured.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Initial Access Ecosystem</div>
+      <div class="desc">No phishing chain detection (T1566), no drive-by compromise (T1189), no supply chain (T1195). Everything in the framework assumes post-initial-access. The entry point ecosystem is entirely missing.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Kerberos Attack Ecosystem</div>
+      <div class="desc">Kerberoasting (T1558.003), AS-REP Roasting (T1558.004), Pass-the-Ticket (T1550.003), Golden Ticket (T1558.001) — zero coverage. These are the primary AD privilege escalation chain in enterprise environments.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Cloud Resource Abuse</div>
+      <div class="desc">Beyond OAuth — no Azure/AWS resource creation (T1578), no compute hijack for cryptomining (T1496), no S3/Blob storage data exfil (T1530). Cloud coverage is identity-only currently.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">DNS Tunnelling C2 Ecosystem</div>
+      <div class="desc">HTTPS beacon exists. DNS C2 (T1071.004) is absent as a dedicated ecosystem. DNS tunnelling is increasingly common as a backup C2 channel when HTTPS is blocked or detected.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">DCOM Lateral Movement</div>
+      <div class="desc">SMB and WMI lateral covered. DCOM (T1021.003) is the third primary lateral movement path — MMC20, ShellWindows, ShellBrowserWindow. No cousin rules mapped for this surface.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">RDP Ecosystem</div>
+      <div class="desc">T1021.001 completely absent. RDP is #1 lateral movement vector in enterprise environments. Session hijack, sticky keys backdoor, RDP tunnel, RDP to cloud — all unmapped cousin surfaces.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Email-Based Threat Chain</div>
+      <div class="desc">Given Mimecast/Cofense background — email threat chain detection would be a natural extension. Attachment execution chains, macro execution, HTML smuggling — none present in current framework.</div>
+    </div>
+  </div>
+
+  <div class="section-title" style="margin-top:32px">Priority 2 — Missing Cousin Rules Within Existing Ecosystems</div>
+
+  <div class="missing-grid">
+    <div class="missing-item">
+      <div class="title">C2 → DNS Tunnelling Cousin</div>
+      <div class="desc">HTTPS and Named Pipe C2 covered. DNS tunnelling (iodine, dnscat2) is the natural cousin — same intent, different protocol. Single rule needed to close the ecosystem.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Credential Access → Kerberoasting Cousin</div>
+      <div class="desc">LSASS and NTDS covered. Kerberoasting uses the legitimate Kerberos TGS mechanism — no LSASS touch. Different substrate, same credential theft intent. Classic cousin gap.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Lateral → WinRM Cousin</div>
+      <div class="desc">SMB and WMI lateral covered. WinRM (T1021.006) is the third leg — same intent, PSRemoting substrate. Evil-WinRM is standard post-exploitation tooling.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Persistence → COM Hijack Cousin</div>
+      <div class="desc">Registry and ScheduledTask persistence covered. COM object hijack (T1546.015) is user-land persistent without registry run key writes — different substrate, same persistence intent.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Impact → Network Share Encryption</div>
+      <div class="desc">Local encryption velocity covered. Ransomware increasingly encrypts network shares before local files. SMB write velocity to UNC paths is the missing cousin to local encryption detection.</div>
+    </div>
+    <div class="missing-item">
+      <div class="title">Identity → Device Code Phishing</div>
+      <div class="desc">OAuth consent abuse covered. Device code phishing (T1528 variant) uses legitimate OAuth device auth flow — different substrate, same token theft intent. Increasingly used against M365.</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function showTab(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+
+</body>
+</html>
