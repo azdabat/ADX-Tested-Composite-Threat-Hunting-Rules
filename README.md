@@ -63,6 +63,20 @@ Its purpose is to ensure the framework remains **deterministic, reliable, and pr
 
 ---
 
+> [!IMPORTANT]  
+> ## Detection Engineering Lifecycle & Real-World Adaptation Model  
+>  
+> This framework is complemented by a dedicated **Detection Engineering Lifecycle model**, which defines how composite detections are **validated, tuned, scored, and governed in real SOC environments**.  
+>  
+> While the core doctrine establishes *how detections should be architected*, this lifecycle formalises **how they survive production reality** — including telemetry constraints, noise modelling, performance trade-offs, and continuous refinement.  
+>  
+> It captures the transition from **theoretical correctness → operational reliability**, ensuring every rule is not only logically sound, but **measurably effective and SOC-safe over time**.  
+>  
+> **Read the full lifecycle model here:**  
+> https://github.com/azdabat/Minimum-Truth-Detection-Framework-ADX-Validated-Composite-Rules/blob/main/Detection_Engineering_Lifecycle.md
+
+---
+
 ## ATT&CK Substrate Adjacency — Detection Coverage Beyond Technique Taxonomy
 
 [**ATT&CK Substrate Adjacency — Detection Coverage Beyond Technique Taxonomy**](https://github.com/azdabat/Minimum-Truth-Detection-Framework-ADX-Validated-Composite-Rules/blob/main/ATT%26CK_Substrate_Adjacency.md)
